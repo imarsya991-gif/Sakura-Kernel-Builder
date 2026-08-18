@@ -58,6 +58,7 @@ on:
           - "none"
           - "ksu-next"
           - "ksu-original"
+          - "xxksu"
         default: "none"
 
 permissions:
@@ -96,6 +97,7 @@ jobs:
           KSU_LABEL="No"
           [ "$PATCH_KERNELSU" = "ksu-next" ] && KSU_LABEL="Yes (KernelSU-Next)"
           [ "$PATCH_KERNELSU" = "ksu-original" ] && KSU_LABEL="Yes (KernelSU Original)"
+          [ "$PATCH_KERNELSU" = "xxksu" ] && KSU_LABEL="Yes (xxksu / backslashxx)"
 
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
@@ -185,6 +187,10 @@ jobs:
 
       # ---------------------------------------------------------------
       # PATCH KERNELSU (optional)
+      # xxksu (backslashxx/KernelSU) auto-wires itself off the target's
+      # existing defconfig — no manual hook step needed, just run setup.sh
+      # with the `master` branch arg. Credit: @linx3141
+      # https://github.com/backslashxx/KernelSU/issues/5
       # ---------------------------------------------------------------
       - name: 🔓 Patch KernelSU
         if: env.PATCH_KERNELSU != 'none'
@@ -194,6 +200,8 @@ jobs:
             curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
           elif [ "$PATCH_KERNELSU" = "ksu-original" ]; then
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+          elif [ "$PATCH_KERNELSU" = "xxksu" ]; then
+            curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
           fi
 
       # ---------------------------------------------------------------
@@ -298,7 +306,7 @@ jobs:
           echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
 
       # ---------------------------------------------------------------
-      # NAMING: KERNEL_NAME-CODENAME-DATE(-KSU/-KSU-NEXT)
+      # NAMING: KERNEL_NAME-CODENAME-DATE(-KSU/-KSU-NEXT/-XXKSU)
       # ---------------------------------------------------------------
       - name: 🏷️ Build final filenames
         if: success()
@@ -308,6 +316,7 @@ jobs:
           case "$PATCH_KERNELSU" in
             ksu-next)     KSU_TAG="-KSU-NEXT" ;;
             ksu-original) KSU_TAG="-KSU" ;;
+            xxksu)        KSU_TAG="-XXKSU" ;;
             *)            KSU_TAG="" ;;
           esac
 
@@ -319,6 +328,8 @@ jobs:
       # KERNELSU MANAGER APK: bundle the matching manager app with the release
       # - ksu-original -> pinned to v0.6.6 (last version compatible with old/legacy KernelSU)
       # - ksu-next     -> always fetched from the latest KernelSU-Next release
+      # - xxksu        -> fetched from the latest backslashxx/KernelSU release
+      #                   (skipped gracefully below if that repo ships no APK asset)
       # ---------------------------------------------------------------
       - name: 📱 Download KernelSU Manager APK
         if: success() && env.PATCH_KERNELSU != 'none'
@@ -333,6 +344,12 @@ jobs:
             APK_VERSION=$(echo "$API_RESPONSE" | jq -r '.tag_name')
             APK_URL=$(echo "$API_RESPONSE" | jq -r \
               '.assets[] | select(.name | test("^KernelSU_Next_v.*_[0-9]+-release\\.apk$")) | .browser_download_url' \
+              | head -n1)
+          elif [ "$PATCH_KERNELSU" = "xxksu" ]; then
+            API_RESPONSE=$(curl -s "https://api.github.com/repos/backslashxx/KernelSU/releases/latest")
+            APK_VERSION=$(echo "$API_RESPONSE" | jq -r '.tag_name')
+            APK_URL=$(echo "$API_RESPONSE" | jq -r \
+              '.assets[] | select(.name | test("\\.apk$")) | .browser_download_url' \
               | head -n1)
           fi
 
@@ -397,6 +414,7 @@ jobs:
           KSU_LABEL="No"
           [ "$PATCH_KERNELSU" = "ksu-next" ] && KSU_LABEL="Yes (KernelSU-Next)"
           [ "$PATCH_KERNELSU" = "ksu-original" ] && KSU_LABEL="Yes (KernelSU Original)"
+          [ "$PATCH_KERNELSU" = "xxksu" ] && KSU_LABEL="Yes (xxksu / backslashxx)"
 
           SEND_FILE="$ZIP_PATH"
           [ "$USE_ANYKERNEL3" = "no" ] && SEND_FILE="$RAW_IMG_PATH"
@@ -442,6 +460,7 @@ jobs:
           KSU_LABEL="No"
           [ "$PATCH_KERNELSU" = "ksu-next" ] && KSU_LABEL="Yes (KernelSU-Next)"
           [ "$PATCH_KERNELSU" = "ksu-original" ] && KSU_LABEL="Yes (KernelSU Original)"
+          [ "$PATCH_KERNELSU" = "xxksu" ] && KSU_LABEL="Yes (xxksu / backslashxx)"
 
           ELAPSED=$(( $(date +%s) - START_EPOCH ))
           DURATION="$((ELAPSED / 60))m $((ELAPSED % 60))s"
