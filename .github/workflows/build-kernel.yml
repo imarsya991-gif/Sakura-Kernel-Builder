@@ -169,7 +169,9 @@ jobs:
           git clone --depth=1 -b "$CLANG_BRANCH" https://github.com/ZyCromerZ/Clang toolchain/clang \
             || git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
 
-          # AOSP GCC is needed as an assembler fallback for 4.4 & 4.14
+          # AOSP GCC is needed as an assembler fallback for 4.4 & 4.14, and
+          # also supplies ld.bfd (GNU ld) used as the linker for those
+          # versions (see the Build kernel step for why).
           if [ "$KERNEL_VERSION" != "4.19" ]; then
             git clone --depth=1 -b android-9.0.0_r1 \
               https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
@@ -239,15 +241,29 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Fix: Ubuntu 22.04 ships GCC 11 (default -fno-common), which breaks
-          # old kernel host-tool sources like scripts/dtc that declare the
-          # same global (e.g. `yylloc`) in two files without `extern`. Old
-          # GCC/Clang defaulted to -fcommon which tolerated this; force it
-          # back on for host tools only (target kernel compile is unaffected).
+          # Fix 1: Ubuntu 22.04 host GCC/Clang default -fno-common breaks old
+          # host-tool sources (e.g. scripts/dtc) that declare a global twice
+          # without `extern`. Force -fcommon back on for host tools only
+          # (target kernel compile is unaffected).
           export HOSTCFLAGS="-fcommon"
           export HOSTCXXFLAGS="-fcommon"
 
-          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
+          # Fix 2: on this old (4.4/4.14) kernel source, several driver
+          # subtrees (drivers/gpu/drm, sound/drivers, etc.) end up with zero
+          # .o files depending on defconfig — expected on old sources, since
+          # many Kconfig-gated folders are simply unused for this SoC.
+          # ld.lld hard-errors on an empty built-in.o ("target emulation
+          # unknown: -m or at least one .o file required"), while GNU ld
+          # (ld.bfd, from the AOSP GCC toolchain) silently accepts it, same
+          # as it always did on these sources originally. Use ld.bfd instead
+          # of ld.lld for 4.4/4.14 to avoid patching every empty subtree.
+          if [ "$KERNEL_VERSION" != "4.19" ]; then
+            LD_BIN="aarch64-linux-android-ld"
+          else
+            LD_BIN="ld.lld"
+          fi
+
+          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 CC=clang LD=$LD_BIN AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
 
           if [ "$KERNEL_VERSION" != "4.19" ]; then
             COMMON_ARGS="$COMMON_ARGS CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu-"
@@ -257,31 +273,14 @@ jobs:
 
           make $COMMON_ARGS "$KERNEL_CONFIG"
 
-          # Fix 1 for build.log: "ld: cannot represent machine `arm'" when linking
-          # arch/arm64/kernel/vdso32/vdso.so.raw. This happens because the
-          # binutils/ld shipped with Ubuntu 22.04 can no longer produce a raw
-          # 32-bit ARM ELF for the old compat vdso. The fix: disable
-          # CONFIG_COMPAT_VDSO so the vdso32 step is skipped entirely (this
-          # doesn't affect modern kernels, the compat vdso is rarely used anyway).
-          #
-          # Fix 2 for build.log: "ld.lld: error: target emulation unknown: -m or
-          # at least one .o file required" when linking drivers/gpu/drm/built-in.o.
-          # This SDM660 (lavender) source has CONFIG_DRM enabled in defconfig but
-          # no actual DRM/KMS driver wired up for this SoC (display here goes
-          # through the legacy MSM fbdev path, drivers/video/fbdev/msm), so the
-          # drm folder ends up empty. ld.lld (unlike old GNU ld) hard-errors on
-          # an empty built-in.o instead of silently producing an empty one.
-          # Disabling DRM and its helpers avoids building that empty subtree.
+          # Fix 3: "ld: cannot represent machine `arm'" when linking
+          # arch/arm64/kernel/vdso32/vdso.so.raw. Ubuntu 22.04's binutils/ld
+          # can no longer produce a raw 32-bit ARM ELF for the old compat
+          # vdso. Disable CONFIG_COMPAT_VDSO to skip that step entirely
+          # (doesn't affect modern kernels; the compat vdso is rarely used).
           if [ -f scripts/config ] && [ -f out/.config ]; then
             ./scripts/config --file out/.config -d COMPAT_VDSO
-            ./scripts/config --file out/.config -d DRM
-            ./scripts/config --file out/.config -d DRM_MSM
-            ./scripts/config --file out/.config -d DRM_KMS_HELPER
-            ./scripts/config --file out/.config -d DRM_KMS_FB_HELPER
             make $COMMON_ARGS olddefconfig
-
-            echo "=== DRM config check ==="
-            grep -E "^CONFIG_DRM" out/.config || echo "(DRM fully disabled)"
           fi
 
           make $COMMON_ARGS 2>&1 | tee build.log
