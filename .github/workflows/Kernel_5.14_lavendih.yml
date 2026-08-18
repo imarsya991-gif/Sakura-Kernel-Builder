@@ -1,4 +1,4 @@
-name: Build Kernel
+Name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -249,29 +249,19 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Fix 1: Ubuntu 22.04 host GCC/Clang default -fno-common breaks old
-          # host-tool sources (e.g. scripts/dtc) that declare a global twice
-          # without `extern`. Force -fcommon back on for host tools only
-          # (target kernel compile is unaffected).
           export HOSTCFLAGS="-fcommon"
           export HOSTCXXFLAGS="-fcommon"
 
-          # Fix 2: on this old (4.4/4.14) kernel source, several driver
-          # subtrees (drivers/gpu/drm, sound/drivers, etc.) end up with zero
-          # .o files depending on defconfig — expected on old sources, since
-          # many Kconfig-gated folders are simply unused for this SoC.
-          # ld.lld hard-errors on an empty built-in.o ("target emulation
-          # unknown: -m or at least one .o file required"), while GNU ld
-          # (ld.bfd, from the AOSP GCC toolchain) silently accepts it, same
-          # as it always did on these sources originally. Use ld.bfd instead
-          # of ld.lld for 4.4/4.14 to avoid patching every empty subtree.
           if [ "$KERNEL_VERSION" != "4.19" ]; then
             LD_BIN="aarch64-linux-android-ld"
           else
             LD_BIN="ld.lld"
           fi
 
-          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 CC=clang LD=$LD_BIN AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
+          # Definisi nama versi custom
+          SPOOF_VERSION="-5.14.505-BTX-Kernel-lavender-Hmp-xxKSU"
+
+          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 CC=clang LD=$LD_BIN AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon LOCALVERSION=$SPOOF_VERSION"
 
           if [ "$KERNEL_VERSION" != "4.19" ]; then
             COMMON_ARGS="$COMMON_ARGS CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu-"
@@ -281,13 +271,20 @@ jobs:
 
           make $COMMON_ARGS "$KERNEL_CONFIG"
 
-          # Fix 3: "ld: cannot represent machine `arm'" when linking
-          # arch/arm64/kernel/vdso32/vdso.so.raw. Ubuntu 22.04's binutils/ld
-          # can no longer produce a raw 32-bit ARM ELF for the old compat
-          # vdso. Disable CONFIG_COMPAT_VDSO to skip that step entirely
-          # (doesn't affect modern kernels; the compat vdso is rarely used).
           if [ -f scripts/config ] && [ -f out/.config ]; then
+            # Nonaktifkan COMPAT_VDSO agar tidak error ld pada 32-bit
             ./scripts/config --file out/.config -d COMPAT_VDSO
+            
+            # Force Spoof Localversion
+            ./scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "$SPOOF_VERSION"
+            ./scripts/config --file out/.config --disable CONFIG_LOCALVERSION_AUTO
+            
+            # Pengaturan KernelSU agar SELinux/Root Hook bekerja normal
+            if [ "$PATCH_KERNELSU" != "none" ]; then
+              ./scripts/config --file out/.config -e CONFIG_KSU
+              ./scripts/config --file out/.config -e CONFIG_KSU_TAMPER_SYS_CALL
+            fi
+
             make $COMMON_ARGS olddefconfig
           fi
 
@@ -304,14 +301,6 @@ jobs:
           fi
 
           echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
-
-      # ---------------------------------------------------------------
-      # SPOOF: Override kernel version string (uname -r / About phone)
-      # ---------------------------------------------------------------
-      - name: 📝 Spoof kernel version
-        working-directory: kernel
-        run: |
-          echo '#define UTS_RELEASE "5.14.505-BTX-Kernel-lavender-Hmp-xxKSU"' > out/include/generated/utsrelease.h
 
       # ---------------------------------------------------------------
       # NAMING: KERNEL_NAME-CODENAME-DATE(-KSU/-KSU-NEXT/-XXKSU)
@@ -475,9 +464,6 @@ jobs:
 
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Grab the last few lines of build.log so the error is visible right
-          # away without opening GitHub Actions. Backticks are stripped so they
-          # don't break Telegram's Markdown formatting.
           ERROR_LOG=$(tail -n 8 kernel/build.log 2>/dev/null | tr -d '`' || true)
           [ -z "$ERROR_LOG" ] && ERROR_LOG="(build.log not found, check the run log manually)"
 
