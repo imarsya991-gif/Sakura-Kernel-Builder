@@ -1,4 +1,4 @@
-name: Build Kernel
+Name: Build Kernel
 
 on:
   workflow_dispatch:
@@ -304,6 +304,14 @@ jobs:
           fi
 
           echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # SPOOF: Override kernel version string (uname -r / About phone)
+      # ---------------------------------------------------------------
+      - name: 📝 Spoof kernel version
+        working-directory: kernel
+        run: |
+          echo '#define UTS_RELEASE "5.14.505-BTX-Kernel-lavender-Hmp-xxKSU"' > out/include/generated/utsrelease.h
 
       # ---------------------------------------------------------------
       # NAMING: KERNEL_NAME-CODENAME-DATE(-KSU/-KSU-NEXT/-XXKSU)
