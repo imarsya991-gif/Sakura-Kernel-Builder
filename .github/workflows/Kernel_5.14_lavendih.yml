@@ -1,0 +1,173 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_SOURCE:
+        description: "Kernel source repo URL"
+        required: true
+        type: string
+      KERNEL_BRANCH:
+        description: "Kernel source branch"
+        required: true
+        type: string
+      KERNEL_CONFIG:
+        description: "Defconfig name (no path, e.g. lavender_defconfig)"
+        required: true
+        type: string
+      KERNEL_NAME:
+        description: "Kernel name used for file naming (e.g. Sakura)"
+        required: false
+        type: string
+        default: "Sakura"
+      KERNEL_VERSION:
+        description: "Major kernel version (determines toolchain)"
+        required: true
+        type: choice
+        options:
+          - "4.4"
+          - "4.14"
+          - "4.19"
+      CODENAME:
+        description: "Device codename (e.g. lavender)"
+        required: true
+        type: string
+      BOT_TOKEN:
+        description: "Telegram Bot Token (optional)"
+        required: false
+        type: string
+        default: ""
+      CHAT_ID:
+        description: "Telegram Chat ID (optional)"
+        required: false
+        type: string
+        default: ""
+      USE_ANYKERNEL3:
+        description: "Use AnyKernel3?"
+        required: true
+        type: choice
+        options:
+          - "yes"
+          - "no"
+        default: "yes"
+      PATCH_KERNELSU:
+        description: "Patch KernelSU (optional)"
+        required: false
+        type: choice
+        options:
+          - "none"
+          - "ksu-next"
+          - "ksu-original"
+          - "xxksu"
+        default: "none"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      KERNEL_SOURCE: ${{ github.event.inputs.KERNEL_SOURCE }}
+      KERNEL_BRANCH: ${{ github.event.inputs.KERNEL_BRANCH }}
+      KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
+      KERNEL_NAME: ${{ github.event.inputs.KERNEL_NAME }}
+      KERNEL_VERSION: ${{ github.event.inputs.KERNEL_VERSION }}
+      CODENAME: ${{ github.event.inputs.CODENAME }}
+      BOT_TOKEN: ${{ github.event.inputs.BOT_TOKEN }}
+      CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
+      USE_ANYKERNEL3: ${{ github.event.inputs.USE_ANYKERNEL3 }}
+      PATCH_KERNELSU: ${{ github.event.inputs.PATCH_KERNELSU }}
+      KBUILD_BUILD_USER: "github-actions"
+      KBUILD_BUILD_HOST: "ci"
+
+    steps:
+      - name: ⏱️ Record start time
+        run: echo "START_EPOCH=$(date +%s)" >> $GITHUB_ENV
+
+      - name: 🧹 Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+
+      - name: 📦 Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            git curl wget zip unzip python3 python-is-python3 \
+            cpio kmod rsync ccache dwarves libncurses-dev \
+            device-tree-compiler
+
+          if [ "$KERNEL_VERSION" = "4.4" ] || [ "$KERNEL_VERSION" = "4.14" ]; then
+            wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl1.0/libssl1.0.0_1.0.2n-1ubuntu5.10_amd64.deb || true
+            sudo dpkg -i libssl1.0.0_1.0.2n-1ubuntu5.10_amd64.deb 2>/dev/null || true
+          fi
+
+      - name: 📥 Clone kernel source
+        run: |
+          git clone --depth=1 --recurse-submodules --shallow-submodules -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" kernel
+          cd kernel
+          if git submodule status | grep -qE '^-'; then
+            git submodule update --init --recursive
+          fi
+          cd ..
+          echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
+          echo "KERNEL_COMMIT=$(cd kernel && git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: 🛠️ Setup toolchain (clang + gcc)
+        run: |
+          mkdir -p toolchain/clang toolchain/gcc64 toolchain/gcc32
+          case "$KERNEL_VERSION" in
+            "4.4")  CLANG_BRANCH="9.0.0-release" ;;
+            "4.14") CLANG_BRANCH="12.0.0-release" ;;
+            "4.19") CLANG_BRANCH="14.0.0-release" ;;
+          esac
+          git clone --depth=1 -b "$CLANG_BRANCH" https://github.com/ZyCromerZ/Clang toolchain/clang \
+            || git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
+          if [ "$KERNEL_VERSION" != "4.19" ]; then
+            git clone --depth=1 -b android-9.0.0_r1 \
+              https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
+            git clone --depth=1 -b android-9.0.0_r1 \
+              https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
+          fi
+          echo "$(pwd)/toolchain/clang/bin" >> $GITHUB_PATH
+          echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
+          echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
+
+      - name: 🔨 Build kernel
+        working-directory: kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export HOSTCFLAGS="-fcommon"
+          export HOSTCXXFLAGS="-fcommon"
+          if [ "$KERNEL_VERSION" != "4.19" ]; then
+            LD_BIN="aarch64-linux-android-ld"
+          else
+            LD_BIN="ld.lld"
+          fi
+          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 CC=clang LD=$LD_BIN AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
+          if [ "$KERNEL_VERSION" != "4.19" ]; then
+            COMMON_ARGS="$COMMON_ARGS CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+          else
+            COMMON_ARGS="$COMMON_ARGS CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+          fi
+          make $COMMON_ARGS "$KERNEL_CONFIG"
+          if [ -f scripts/config ] && [ -f out/.config ]; then
+            ./scripts/config --file out/.config -d COMPAT_VDSO
+            make $COMMON_ARGS olddefconfig
+          fi
+          make $COMMON_ARGS 2>&1 | tee build.log
+          IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
+          [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" -o -name "Image-dtb" \) | head -n1)
+          [ -z "$IMG" ] && { echo "Kernel image not found, build failed."; exit 1; }
+          echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # SPOOF: Override kernel version string (uname -r / About phone)
+      # ---------------------------------------------------------------
+      - name: 📝 Spoof kernel version
+        working-directory: kernel
+        run: |
+          echo '#define UTS_RELEASE "5.14.505-BTX-Kernel-lavender-Hmp-xxKSU"' > out/include/generated/utsrelease.h
