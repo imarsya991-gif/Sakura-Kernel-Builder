@@ -91,16 +91,11 @@ jobs:
           [ "$PATCH_KERNELSU" = "ksu-next" ] && KSU_LABEL="Ya (KernelSU-Next)"
           [ "$PATCH_KERNELSU" = "ksu-original" ] && KSU_LABEL="Ya (KernelSU Original)"
 
+          MSG=$'🔨 *Build Started*\nTriggered by: `${{ github.actor }}`\nDevice: `'"${CODENAME}"'`\nKernel version: `'"${KERNEL_VERSION}"'`\nExtraversion: `'"${EXTRAVERSION:-none}"'`\nKernelSU: `'"${KSU_LABEL}"'`\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d chat_id="${CHAT_ID}" \
             -d parse_mode="Markdown" \
-            -d text="🔨 *Build Started*
-Triggered by: \`${{ github.actor }}\`
-Device: \`${CODENAME}\`
-Kernel version: \`${KERNEL_VERSION}\`
-Extraversion: \`${EXTRAVERSION:-none}\`
-KernelSU: \`${KSU_LABEL}\`
-Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --data-urlencode text="${MSG}"
 
       # ---------------------------------------------------------------
       # SETUP
@@ -277,16 +272,11 @@ Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.r
           [ "$PATCH_KERNELSU" = "ksu-next" ] && KSU_LABEL="Ya (KernelSU-Next)"
           [ "$PATCH_KERNELSU" = "ksu-original" ] && KSU_LABEL="Ya (KernelSU Original)"
 
+          MSG=$'✅ *Build Success*\nTriggered by: `${{ github.actor }}`\nDevice: `'"${CODENAME}"'`\nKernel version: `'"${KERNEL_VERSION}"'`\nExtraversion: `'"${EXTRAVERSION:-none}"'`\nKernelSU: `'"${KSU_LABEL}"'`\nDownload: ${{ github.server_url }}/${{ github.repository }}/releases/tag/'"${RELEASE_TAG}"''
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d chat_id="${CHAT_ID}" \
             -d parse_mode="Markdown" \
-            -d text="✅ *Build Success*
-Triggered by: \`${{ github.actor }}\`
-Device: \`${CODENAME}\`
-Kernel version: \`${KERNEL_VERSION}\`
-Extraversion: \`${EXTRAVERSION:-none}\`
-KernelSU: \`${KSU_LABEL}\`
-Download: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+            --data-urlencode text="${MSG}"
 
       - name: "Telegram: Send file"
         if: success() && env.BOT_TOKEN != '' && env.CHAT_ID != ''
@@ -309,16 +299,11 @@ Download: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${RELEA
           [ "$PATCH_KERNELSU" = "ksu-next" ] && KSU_LABEL="Ya (KernelSU-Next)"
           [ "$PATCH_KERNELSU" = "ksu-original" ] && KSU_LABEL="Ya (KernelSU Original)"
 
+          MSG=$'❌ *Build Failed*\nTriggered by: `${{ github.actor }}`\nDevice: `'"${CODENAME}"'`\nKernel version: `'"${KERNEL_VERSION}"'`\nExtraversion: `'"${EXTRAVERSION:-none}"'`\nKernelSU: `'"${KSU_LABEL}"'`\nLog: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d chat_id="${CHAT_ID}" \
             -d parse_mode="Markdown" \
-            -d text="❌ *Build Failed*
-Triggered by: \`${{ github.actor }}\`
-Device: \`${CODENAME}\`
-Kernel version: \`${KERNEL_VERSION}\`
-Extraversion: \`${EXTRAVERSION:-none}\`
-KernelSU: \`${KSU_LABEL}\`
-Log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --data-urlencode text="${MSG}"
 
       - name: Upload build log on failure
         if: failure()
@@ -327,4 +312,3 @@ Log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.r
           name: build-log
           path: kernel/build.log
           if-no-files-found: ignore
-          
