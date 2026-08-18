@@ -257,15 +257,31 @@ jobs:
 
           make $COMMON_ARGS "$KERNEL_CONFIG"
 
-          # Fix for build.log: "ld: cannot represent machine `arm'" when linking
+          # Fix 1 for build.log: "ld: cannot represent machine `arm'" when linking
           # arch/arm64/kernel/vdso32/vdso.so.raw. This happens because the
           # binutils/ld shipped with Ubuntu 22.04 can no longer produce a raw
           # 32-bit ARM ELF for the old compat vdso. The fix: disable
           # CONFIG_COMPAT_VDSO so the vdso32 step is skipped entirely (this
           # doesn't affect modern kernels, the compat vdso is rarely used anyway).
+          #
+          # Fix 2 for build.log: "ld.lld: error: target emulation unknown: -m or
+          # at least one .o file required" when linking drivers/gpu/drm/built-in.o.
+          # This SDM660 (lavender) source has CONFIG_DRM enabled in defconfig but
+          # no actual DRM/KMS driver wired up for this SoC (display here goes
+          # through the legacy MSM fbdev path, drivers/video/fbdev/msm), so the
+          # drm folder ends up empty. ld.lld (unlike old GNU ld) hard-errors on
+          # an empty built-in.o instead of silently producing an empty one.
+          # Disabling DRM and its helpers avoids building that empty subtree.
           if [ -f scripts/config ] && [ -f out/.config ]; then
             ./scripts/config --file out/.config -d COMPAT_VDSO
+            ./scripts/config --file out/.config -d DRM
+            ./scripts/config --file out/.config -d DRM_MSM
+            ./scripts/config --file out/.config -d DRM_KMS_HELPER
+            ./scripts/config --file out/.config -d DRM_KMS_FB_HELPER
             make $COMMON_ARGS olddefconfig
+
+            echo "=== DRM config check ==="
+            grep -E "^CONFIG_DRM" out/.config || echo "(DRM fully disabled)"
           fi
 
           make $COMMON_ARGS 2>&1 | tee build.log
@@ -442,4 +458,16 @@ jobs:
           MSG=$'❌ *Build Failed*\nKernel: `'"${KERNEL_NAME}"'`\nDevice: `'"${CODENAME}"'`\nKernel version: `'"${KERNEL_VERSION}"'`\nKernelSU: `'"${KSU_LABEL}"'`\n⏱ Duration: `'"${DURATION}"'`\n\n📄 *Last error:*\n\`\`\`\n'"${ERROR_LOG}"'\n\`\`\`'
 
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d chat_id="${CHAT_ID}"
+            -d chat_id="${CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            --data-urlencode text="${MSG}" \
+            --data-urlencode reply_markup="$(jq -n --arg url "$RUN_URL" \
+              '{inline_keyboard: [[{text: "🔗 View Log", url: $url}]]}')"
+
+      - name: 🧾 Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel/build.log
+          if-no-files-found: ignore
