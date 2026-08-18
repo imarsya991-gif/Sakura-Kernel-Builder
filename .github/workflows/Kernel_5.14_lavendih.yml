@@ -1,4 +1,4 @@
-Name: Build Kernel 5.14
+name: Build Kernel 5.14
 
 on:
   workflow_dispatch:
