@@ -92,11 +92,10 @@ jobs:
 
       - name: 🛠️ Setup Clang Latest & GCC
         run: |
-          mkdir -p toolchain/clang toolchain/gcc64 toolchain/gcc32
+          mkdir -p toolchain/gcc64 toolchain/gcc32
           
-          # Download AOSP Clang Terbaru (r510928)
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r510928.tar.gz
-          tar -xf clang-r510928.tar.gz -C toolchain/clang
+          # Clone ZyCros Clang (Lebih stabil & anti-corrupt dibanding wget tar.gz)
+          git clone --depth=1 https://gitlab.com/ZyCros/ZyCros-Clang.git toolchain/clang
           
           # GCC 64 & 32
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
