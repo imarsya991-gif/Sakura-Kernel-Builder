@@ -1,20 +1,20 @@
-name: Build KernelSU Kernel
+name: Build NMPROJECT Kernel (ginkgo)
 
 on:
   workflow_dispatch:
     inputs:
       KERNEL_CONFIG:
-        description: 'Nama file defconfig'
+        description: 'Nama defconfig (relatif ke arch/arm64/configs)'
         required: true
-        default: 'lavender_user_defconfig'
-      KERNEL_VERSION:
-        description: 'Versi basis kernel (4.4 / 4.14 / 4.19)'
-        required: true
-        default: '4.4'
+        default: 'vendor/ginkgo-perf_defconfig'
       PATCH_KERNELSU:
         description: 'Varian KernelSU (xxksu / ksu-next / none)'
         required: true
         default: 'xxksu'
+      CLANG_VERSION:
+        description: 'Versi LLVM/Clang dari apt.llvm.org'
+        required: true
+        default: '22'
 
 jobs:
   build:
@@ -27,21 +27,22 @@ jobs:
       - name: 🛠️ Set up build environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison ccache zip uriparser-dev git curl wget
+          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev \
+            flex bison zip git curl wget cpio python3 \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: 🧰 Fetch Toolchains & Setup Source
+      - name: 🧰 Install Clang & fetch AnyKernel3
         run: |
-          # Clone Toolchain Clang (Proton Clang / Android Clang)
-          git clone --depth=1 https://gitlab.com/LeSight/clang-r383902.git clang
-          
-          # Clone Toolchain GCC Cross-Compiler
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ github.event.inputs.CLANG_VERSION }}
+          sudo apt-get install -y lld-${{ github.event.inputs.CLANG_VERSION }} llvm-${{ github.event.inputs.CLANG_VERSION }}
+          echo "/usr/lib/llvm-${{ github.event.inputs.CLANG_VERSION }}/bin" >> $GITHUB_PATH
 
-          # Clone AnyKernel3 untuk packaging .zip
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-          # Setup KernelSU jika diaktifkan
+      - name: 🔌 Setup KernelSU
+        run: |
           if [ "${{ github.event.inputs.PATCH_KERNELSU }}" == "xxksu" ]; then
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           elif [ "${{ github.event.inputs.PATCH_KERNELSU }}" == "ksu-next" ]; then
@@ -50,66 +51,62 @@ jobs:
 
       - name: 🔨 Build kernel
         run: |
+          clang --version | head -n1
+
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Set PATH ke Toolchain yang didownload
-          export PATH="$(pwd)/clang/bin:$(pwd)/gcc64/bin:$(pwd)/gcc32/bin:$PATH"
+          # Nama kernel (suffix uname -r)
+          KERNEL_NAME="-NMメPROJECT"
 
-          export HOSTCFLAGS="-fcommon"
-          export HOSTCXXFLAGS="-fcommon"
+          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
 
-          KERNEL_VER="${{ github.event.inputs.KERNEL_VERSION }}"
-          
-          if [ "$KERNEL_VER" != "4.19" ]; then
-            LD_BIN="aarch64-linux-android-ld"
-          else
-            LD_BIN="ld.lld"
-          fi
+          KCF="-Wno-error -Wno-unused-but-set-variable -Wno-implicit-function-declaration -Wno-int-conversion -Wno-strict-prototypes -Wno-deprecated-non-prototype"
 
-          # 1. Spoofing versi kernel ke 5.14.505 via Makefile
-          sed -i 's/^VERSION = .*/VERSION = 5/' Makefile
-          sed -i 's/^PATCHLEVEL = .*/PATCHLEVEL = 14/' Makefile
-          sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 505/' Makefile
-
-          # 2. String suffix (< 64 karakter)
-          SPOOF_VERSION="-BTX-lavender-xxKSU"
-
-          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 CC=clang LD=$LD_BIN AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
-
-          if [ "$KERNEL_VER" != "4.19" ]; then
-            COMMON_ARGS="$COMMON_ARGS CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-          else
-            COMMON_ARGS="$COMMON_ARGS CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-          fi
-
-          # Generate defconfig awal
-          make $COMMON_ARGS "${{ github.event.inputs.KERNEL_CONFIG }}"
+          # Generate defconfig
+          make $COMMON_ARGS KCFLAGS="$KCF" "${{ github.event.inputs.KERNEL_CONFIG }}"
 
           if [ -f scripts/config ] && [ -f out/.config ]; then
-            ./scripts/config --file out/.config -d COMPAT_VDSO
-            
-            # Set Localversion & matikan auto-version
-            ./scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "$SPOOF_VERSION"
-            ./scripts/config --file out/.config --disable CONFIG_LOCALVERSION_AUTO
-            
-            # Konfigurasi KernelSU & Syscall Hooking
+            CFG="./scripts/config --file out/.config"
+
+            $CFG -d COMPAT_VDSO
+
+            # Nama kernel
+            $CFG --set-str CONFIG_LOCALVERSION "$KERNEL_NAME"
+            $CFG -d CONFIG_LOCALVERSION_AUTO
+
+            # Full LTO (ThinLTO & CFI dimatikan)
+            $CFG -e CONFIG_LTO_CLANG
+            $CFG -d CONFIG_THINLTO
+            $CFG -d CONFIG_CFI_CLANG
+            $CFG -d CONFIG_LTO_NONE
+
+            # KernelSU & syscall hooking
             if [ "${{ github.event.inputs.PATCH_KERNELSU }}" != "none" ]; then
-              ./scripts/config --file out/.config -e CONFIG_KSU
-              ./scripts/config --file out/.config -e CONFIG_KSU_TAMPER_SYS_CALL
-              ./scripts/config --file out/.config -d CONFIG_KSU_VIA_KPROBES
-              ./scripts/config --file out/.config -e CONFIG_IP_NF_SECURITY
-              ./scripts/config --file out/.config -e CONFIG_IP6_NF_SECURITY
+              $CFG -e CONFIG_KSU
+              $CFG -e CONFIG_KSU_TAMPER_SYS_CALL
+              $CFG -d CONFIG_KSU_VIA_KPROBES
+              $CFG -e CONFIG_IP_NF_SECURITY
+              $CFG -e CONFIG_IP6_NF_SECURITY
             fi
 
-            # Terapkan perubahan config
-            make $COMMON_ARGS olddefconfig
+            make $COMMON_ARGS KCFLAGS="$KCF" olddefconfig
+
+            echo "=== Cek config ==="
+            grep -E "CONFIG_LOCALVERSION|CONFIG_LTO|CONFIG_THINLTO|CONFIG_CFI_CLANG|CONFIG_KSU" out/.config || true
           fi
 
-          # Eksekusi Kompilasi
-          make $COMMON_ARGS 2>&1 | tee build.log
+          # Kompilasi
+          make $COMMON_ARGS KCFLAGS="$KCF" 2>&1 | tee build.log
+          test ${PIPESTATUS[0]} -eq 0 || { echo "Build gagal, lihat build.log"; exit 1; }
 
-          # Cari hasil output Image
+          # Cari Image
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
           if [ -z "$IMG" ]; then
             IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" -o -name "Image-dtb" \) | head -n1)
@@ -120,13 +117,31 @@ jobs:
             exit 1
           fi
 
-          # Pindahkan Image ke AnyKernel3 untuk di-zip
-          cp $IMG AnyKernel3/
+          # Atur AnyKernel3 untuk ginkgo
+          cp "$IMG" AnyKernel3/
           cd AnyKernel3
-          zip -r9 "../Kernel-5.14.505-lavender.zip" * -x .git README.md
+          sed -i 's|^kernel.string=.*|kernel.string=NMメPROJECT|' anykernel.sh
+          sed -i 's|^do.devicecheck=.*|do.devicecheck=1|' anykernel.sh
+          sed -i 's|^device.name1=.*|device.name1=ginkgo|' anykernel.sh
+          sed -i 's|^device.name2=.*|device.name2=willow|' anykernel.sh
+          sed -i 's|^device.name3=.*|device.name3=|' anykernel.sh
+          sed -i 's|^device.name4=.*|device.name4=|' anykernel.sh
+          sed -i 's|^device.name5=.*|device.name5=|' anykernel.sh
+          sed -i 's|^BLOCK=.*|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
+          sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|' anykernel.sh
+
+          zip -r9 "../NMPROJECT-ginkgo-4.14.zip" * -x .git README.md
 
       - name: 📤 Upload Flashable Kernel (.zip)
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-5.14.505-lavender-zip
-          path: Kernel-5.14.505-lavender.zip
+          name: NMPROJECT-ginkgo-zip
+          path: NMPROJECT-ginkgo-4.14.zip
+
+      - name: 📤 Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
