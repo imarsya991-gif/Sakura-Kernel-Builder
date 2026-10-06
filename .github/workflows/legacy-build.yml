@@ -90,16 +90,14 @@ jobs:
           cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
-      - name: 🛠️ Setup Clang Latest & GCC
+      - name: 🛠️ Setup Clang (AOSP / Azure) & GCC
         run: |
-          mkdir -p toolchain/clang toolchain/gcc64 toolchain/gcc32
+          mkdir -p toolchain/gcc64 toolchain/gcc32
           
-          # Download AOSP Clang r488907 via curl (direct tarball)
-          curl -L "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r488907.tar.gz" -o clang.tar.gz
-          tar -xzf clang.tar.gz -C toolchain/clang
-          rm clang.tar.gz
+          # Clone Clang AOSP/Azure langsung via Git (bebas error gzip/wget corrupt)
+          git clone --depth=1 https://gitlab.com/Ptree-Team/aosp-clang.git toolchain/clang
           
-          # GCC 64 & 32
+          # GCC 64 & 32 (Cross-Compiler)
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
 
