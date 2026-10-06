@@ -14,12 +14,12 @@ on:
         type: string
         default: "floppy-unity"
       KERNEL_CONFIG:
-        description: "Nama defconfig (contoh: ginkgo_defconfig)"
+        description: "Nama defconfig"
         required: true
         type: string
         default: "ginkgo_defconfig"
       CODENAME:
-        description: "Codename device (contoh: ginkgo)"
+        description: "Codename device"
         required: true
         type: string
         default: "ginkgo"
@@ -90,11 +90,11 @@ jobs:
           cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
-      - name: 🛠️ Setup Clang (AOSP) & GCC
+      - name: 🛠️ Setup Clang (AOSP Mirror) & GCC
         run: |
           mkdir -p toolchain/gcc64 toolchain/gcc32
           
-          # Clone AOSP Clang dari GitHub publik (Bebas error login/corrupt)
+          # Clone AOSP Clang via GitHub (Bebas error login & anti-corrupt)
           git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
           
           # GCC 64 & 32 (Cross-Compiler)
