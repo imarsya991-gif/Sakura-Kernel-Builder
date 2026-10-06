@@ -4,13 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       KERNEL_CONFIG:
-        description: 'Nama defconfig (relatif ke arch/arm64/configs)'
+        description: 'Base defconfig (relatif ke arch/arm64/configs)'
         required: true
-        default: 'vendor/ginkgo-perf_defconfig'
+        default: 'vendor/trinket-perf_defconfig'
+      EXTRA_CONFIG:
+        description: 'Config fragment, pisah spasi (boleh kosong)'
+        required: false
+        default: 'vendor/ginkgo.config'
       PATCH_KERNELSU:
         description: 'Varian KernelSU (xxksu / ksu-next / none)'
         required: true
         default: 'xxksu'
+      DROIDSPACES:
+        description: 'Aktifkan config Droidspaces (true / false)'
+        required: true
+        default: 'true'
       CLANG_VERSION:
         description: 'Versi LLVM/Clang dari apt.llvm.org'
         required: true
@@ -21,17 +29,14 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: 📥 Checkout repository
-        uses: actions/checkout@v4
-
       - name: 🛠️ Set up build environment
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev \
-            flex bison zip git curl wget cpio python3 \
+            flex bison zip git curl wget cpio python3 perl zstd dwarves ccache \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: 🧰 Install Clang & fetch AnyKernel3
+      - name: 🧰 Install Clang
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -39,11 +44,18 @@ jobs:
           sudo apt-get install -y lld-${{ github.event.inputs.CLANG_VERSION }} llvm-${{ github.event.inputs.CLANG_VERSION }}
           echo "/usr/lib/llvm-${{ github.event.inputs.CLANG_VERSION }}/bin" >> $GITHUB_PATH
 
+      - name: 📥 Clone source (FlopKernel default branch) & AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/FlopKernel-Series/flop_trinket-mi_kernel.git kernel
+          git -C kernel branch --show-current
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
       - name: 🔌 Setup KernelSU
         run: |
-          if [ "${{ github.event.inputs.PATCH_KERNELSU }}" == "xxksu" ]; then
+          cd kernel
+          if [ -d KernelSU ] || [ -d drivers/kernelsu ]; then
+            echo "KernelSU sudah ada di source, setup dilewati."
+          elif [ "${{ github.event.inputs.PATCH_KERNELSU }}" == "xxksu" ]; then
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           elif [ "${{ github.event.inputs.PATCH_KERNELSU }}" == "ksu-next" ]; then
             curl -LSs "https://raw.githubusercontent.com/rifs28/KernelSU-Next/next/kernel/setup.sh" | bash -s next
@@ -56,68 +68,95 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Nama kernel (suffix uname -r)
           KERNEL_NAME="-NMメPROJECT"
+          OUT="$GITHUB_WORKSPACE/out"
+          KERNEL_CONFIG="${{ github.event.inputs.KERNEL_CONFIG }}"
+          EXTRA_CONFIG="${{ github.event.inputs.EXTRA_CONFIG }}"
+          CFGDIR="kernel/arch/arm64/configs"
 
-          COMMON_ARGS="-j$(nproc --all) O=out ARCH=arm64 \
+          # Cek defconfig
+          if [ ! -f "$CFGDIR/$KERNEL_CONFIG" ]; then
+            echo "Defconfig tidak ditemukan: $KERNEL_CONFIG"
+            echo "Yang tersedia:"
+            ls "$CFGDIR/vendor" 2>/dev/null | grep -Ei 'ginkgo|trinket' || ls "$CFGDIR" | grep -Ei 'ginkgo|trinket'
+            exit 1
+          fi
+
+          MAKE_ARGS="-C kernel O=$OUT ARCH=arm64 SUBARCH=arm64 \
+            LLVM=1 LLVM_IAS=1 \
             CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon"
+            HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon \
+            -j$(nproc --all)"
 
           KCF="-Wno-error -Wno-unused-but-set-variable -Wno-implicit-function-declaration -Wno-int-conversion -Wno-strict-prototypes -Wno-deprecated-non-prototype"
 
-          # Generate defconfig
-          make $COMMON_ARGS KCFLAGS="$KCF" "${{ github.event.inputs.KERNEL_CONFIG }}"
+          # 1. Base defconfig
+          mkdir -p "$OUT"
+          rm -f "$OUT/.config" "$OUT/.config.old"
+          make $MAKE_ARGS KCFLAGS="$KCF" "$KERNEL_CONFIG"
 
-          if [ -f scripts/config ] && [ -f out/.config ]; then
-            CFG="./scripts/config --file out/.config"
-
-            $CFG -d COMPAT_VDSO
-
-            # Nama kernel
-            $CFG --set-str CONFIG_LOCALVERSION "$KERNEL_NAME"
-            $CFG -d CONFIG_LOCALVERSION_AUTO
-
-            # Full LTO (ThinLTO & CFI dimatikan)
-            $CFG -e CONFIG_LTO_CLANG
-            $CFG -d CONFIG_THINLTO
-            $CFG -d CONFIG_CFI_CLANG
-            $CFG -d CONFIG_LTO_NONE
-
-            # KernelSU & syscall hooking
-            if [ "${{ github.event.inputs.PATCH_KERNELSU }}" != "none" ]; then
-              $CFG -e CONFIG_KSU
-              $CFG -e CONFIG_KSU_TAMPER_SYS_CALL
-              $CFG -d CONFIG_KSU_VIA_KPROBES
-              $CFG -e CONFIG_IP_NF_SECURITY
-              $CFG -e CONFIG_IP6_NF_SECURITY
+          # 2. Merge fragment (kalau ada)
+          for frag in $EXTRA_CONFIG; do
+            if [ -f "$CFGDIR/$frag" ]; then
+              echo "Merging: $frag"
+              cat "$CFGDIR/$frag" >> "$OUT/.config"
+            else
+              echo "WARN: fragment tidak ditemukan, dilewati: $frag"
             fi
+          done
 
-            make $COMMON_ARGS KCFLAGS="$KCF" olddefconfig
+          CFG="kernel/scripts/config --file $OUT/.config"
 
-            echo "=== Cek config ==="
-            grep -E "CONFIG_LOCALVERSION|CONFIG_LTO|CONFIG_THINLTO|CONFIG_CFI_CLANG|CONFIG_KSU" out/.config || true
+          # 3. Nama kernel + Full LTO
+          $CFG -d COMPAT_VDSO
+          $CFG --set-str CONFIG_LOCALVERSION "$KERNEL_NAME"
+          $CFG -d CONFIG_LOCALVERSION_AUTO
+          $CFG -e CONFIG_LTO_CLANG
+          $CFG -d CONFIG_THINLTO
+          $CFG -d CONFIG_CFI_CLANG
+          $CFG -d CONFIG_LTO_NONE
+
+          # 4. KernelSU
+          if [ "${{ github.event.inputs.PATCH_KERNELSU }}" != "none" ]; then
+            $CFG -e CONFIG_KSU
+            $CFG -e CONFIG_KSU_TAMPER_SYS_CALL
+            $CFG -d CONFIG_KSU_VIA_KPROBES
+            $CFG -e CONFIG_IP_NF_SECURITY
+            $CFG -e CONFIG_IP6_NF_SECURITY
           fi
 
-          # Kompilasi
-          make $COMMON_ARGS KCFLAGS="$KCF" 2>&1 | tee build.log
+          # 5. Droidspaces (namespace, cgroup, overlayfs)
+          if [ "${{ github.event.inputs.DROIDSPACES }}" == "true" ]; then
+            for opt in SYSVIPC POSIX_MQUEUE NAMESPACES UTS_NS IPC_NS USER_NS PID_NS NET_NS \
+                       CGROUPS CGROUP_DEVICE CGROUP_PIDS CGROUP_FREEZER CGROUP_SCHED CPUSETS MEMCG \
+                       DEVTMPFS DEVTMPFS_MOUNT OVERLAY_FS FHANDLE VETH BRIDGE; do
+              $CFG -e CONFIG_$opt
+            done
+          fi
+
+          make $MAKE_ARGS KCFLAGS="$KCF" olddefconfig
+
+          echo "=== Cek config ==="
+          grep -E "CONFIG_LOCALVERSION|CONFIG_LTO|CONFIG_THINLTO|CONFIG_CFI_CLANG|CONFIG_KSU|CONFIG_NAMESPACES|CONFIG_OVERLAY_FS|CONFIG_USER_NS" "$OUT/.config" || true
+
+          # 6. Compile
+          make $MAKE_ARGS KCFLAGS="$KCF" Image.gz-dtb 2>&1 | tee build.log
           test ${PIPESTATUS[0]} -eq 0 || { echo "Build gagal, lihat build.log"; exit 1; }
 
-          # Cari Image
-          IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
-          if [ -z "$IMG" ]; then
-            IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" -o -name "Image-dtb" \) | head -n1)
-          fi
-
-          if [ -z "$IMG" ]; then
+          IMG="$OUT/arch/arm64/boot/Image.gz-dtb"
+          if [ ! -f "$IMG" ]; then
             echo "Kernel image not found, build failed."
             exit 1
           fi
 
-          # Atur AnyKernel3 untuk ginkgo
+          # 7. Packaging AnyKernel3
+          ZIPNAME="NMPROJECT-ginkgo-$(date +%Y%m%d-%H%M)"
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+
           cp "$IMG" AnyKernel3/
           cd AnyKernel3
           sed -i 's|^kernel.string=.*|kernel.string=NMメPROJECT|' anykernel.sh
@@ -129,14 +168,13 @@ jobs:
           sed -i 's|^device.name5=.*|device.name5=|' anykernel.sh
           sed -i 's|^BLOCK=.*|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
           sed -i 's|^IS_SLOT_DEVICE=.*|IS_SLOT_DEVICE=0;|' anykernel.sh
-
-          zip -r9 "../NMPROJECT-ginkgo-4.14.zip" * -x .git README.md
+          zip -r9 "../$ZIPNAME.zip" * -x .git README.md
 
       - name: 📤 Upload Flashable Kernel (.zip)
         uses: actions/upload-artifact@v4
         with:
           name: NMPROJECT-ginkgo-zip
-          path: NMPROJECT-ginkgo-4.14.zip
+          path: ${{ env.ZIPNAME }}.zip
 
       - name: 📤 Upload build log
         if: always()
