@@ -1,7 +1,43 @@
-name: Build Kernel - NM PROJECT (Ginkgo)
+name: Manual Build Kernel - NM PROJECT
 
 on:
   workflow_dispatch:
+    inputs:
+      KERNEL_SOURCE:
+        description: "URL repo kernel source"
+        required: true
+        type: string
+        default: "https://github.com/FlopKernel-Series/flop_trinket-mi_kernel"
+      KERNEL_BRANCH:
+        description: "Branch kernel source"
+        required: true
+        type: string
+        default: "floppy-unity"
+      KERNEL_CONFIG:
+        description: "Nama defconfig (contoh: ginkgo_defconfig)"
+        required: true
+        type: string
+        default: "ginkgo_defconfig"
+      CODENAME:
+        description: "Codename device (contoh: ginkgo)"
+        required: true
+        type: string
+        default: "ginkgo"
+      EXTRAVERSION:
+        description: "EXTRAVERSION / Nama Kernel"
+        required: false
+        type: string
+        default: "NMメPROJECT"
+      BOT_TOKEN:
+        description: "Telegram Bot Token (opsional)"
+        required: false
+        type: string
+        default: ""
+      CHAT_ID:
+        description: "Telegram Chat ID (opsional)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -10,11 +46,13 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     env:
-      KERNEL_SOURCE: "https://github.com/FlopKernel-Series/flop_trinket-mi_kernel"
-      KERNEL_BRANCH: "floppy-unity"
-      KERNEL_CONFIG: "ginkgo_defconfig"
-      CODENAME: "ginkgo"
-      EXTRAVERSION: "NMメPROJECT"
+      KERNEL_SOURCE: ${{ github.event.inputs.KERNEL_SOURCE }}
+      KERNEL_BRANCH: ${{ github.event.inputs.KERNEL_BRANCH }}
+      KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
+      CODENAME: ${{ github.event.inputs.CODENAME }}
+      EXTRAVERSION: ${{ github.event.inputs.EXTRAVERSION }}
+      BOT_TOKEN: ${{ github.event.inputs.BOT_TOKEN }}
+      CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
       KBUILD_BUILD_USER: "github-actions"
       KBUILD_BUILD_HOST: "ci"
 
@@ -31,22 +69,36 @@ jobs:
             build-essential bc bison flex libssl-dev libelf-dev \
             git curl wget zip unzip python3 python-is-python3 \
             cpio kmod rsync ccache dwarves libncurses-dev \
-            device-tree-compiler libssl1.0.0 || sudo apt-get install -y libssl-dev
+            device-tree-compiler
+
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl1.0/libssl1.0.0_1.0.2n-1ubuntu5.10_amd64.deb || true
+          sudo dpkg -i libssl1.0.0_1.0.2n-1ubuntu5.10_amd64.deb 2>/dev/null || true
+
+      - name: 🗃️ Setup ccache
+        run: |
+          mkdir -p ~/.ccache
+          echo "USE_CCACHE=1" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
       - name: 📥 Clone kernel source
         run: |
-          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" kernel
+          git clone --depth=1 --recurse-submodules --shallow-submodules -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" kernel
+          cd kernel
+          if git submodule status | grep -qE '^-'; then
+            git submodule update --init --recursive
+          fi
+          cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
-      - name: 🛠️ Setup Clang (AOSP Clang Latest) & GCC 32/64
+      - name: 🛠️ Setup Clang Latest & GCC
         run: |
           mkdir -p toolchain/clang toolchain/gcc64 toolchain/gcc32
           
-          # Download Clang terbaru (AOSP Clang r488907 / r510928)
+          # Download AOSP Clang Terbaru (r510928)
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r510928.tar.gz
           tar -xf clang-r510928.tar.gz -C toolchain/clang
           
-          # Download GCC 64 & 32 sebagai pendukung Cross-Compile
+          # GCC 64 & 32
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
 
@@ -59,53 +111,76 @@ jobs:
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
 
-      - name: 🔨 Build Kernel (Full LTO & Clang)
+      - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
-          export LOCALVERSION="-${EXTRAVERSION}"
+          [ -n "$EXTRAVERSION" ] && export LOCALVERSION="-${EXTRAVERSION}"
 
-          # Konfigurasi LTO & Clang Flag
-          ARGS="O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip"
+          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
           make $ARGS "$KERNEL_CONFIG"
           
-          # Aktifkan Full LTO di .config
+          # Enable Full LTO
           scripts/config --file out/.config --enable CONFIG_LTO_CLANG
           scripts/config --file out/.config --disable CONFIG_THINLTO
           
           make -j$(nproc --all) $ARGS 2>&1 | tee build.log
 
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
-          [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f -name "Image.gz" | head -n1)
-          
+          [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" \) | head -n1)
+
+          if [ -z "$IMG" ]; then
+            echo "Build gagal, image tidak ditemukan!"
+            exit 1
+          fi
+
           echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
 
-      - name: 🎁 Package AnyKernel3
+      - name: 🏷️ Setup file names
+        run: |
+          DATE=$(date +%Y%m%d)
+          if [ -n "$EXTRAVERSION" ]; then
+            BASE_NAME="${EXTRAVERSION}-${CODENAME}-${DATE}"
+          else
+            BASE_NAME="${CODENAME}-${DATE}"
+          fi
+          echo "BASE_NAME=${BASE_NAME}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=build-${{ github.run_id }}" >> $GITHUB_ENV
+
+      - name: 🎁 Package with AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
-          rm -rf AnyKernel3/.git
+          rm -rf AnyKernel3/.git AnyKernel3/*.zip
           cp "$IMG_PATH" AnyKernel3/
-          sed -i "s/device.name1=.*/device.name1=${CODENAME}/" AnyKernel3/anykernel.sh
+          sed -i "s/device.name1=.*/device.name1=${CODENAME}/" AnyKernel3/anykernel.sh || true
           cd AnyKernel3
-          ZIP_NAME="${EXTRAVERSION}-${CODENAME}-$(date +%Y%m%d).zip"
-          zip -r9 "../$ZIP_NAME" . -x "*.git*"
-          echo "ZIP_PATH=$(pwd)/$ZIP_NAME" >> $GITHUB_ENV
+          zip -r9 "../${BASE_NAME}.zip" . -x ".git*" -x "*.zip"
+          cd ..
+          echo "ZIP_PATH=$(pwd)/${BASE_NAME}.zip" >> $GITHUB_ENV
 
-      - name: 🚀 Publish Build Artifact
-        uses: actions/upload-artifact@v4
+      - name: 🚀 Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: NM-PROJECT-Kernel
-          path: ${{ env.ZIP_PATH }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "${{ env.BASE_NAME }}"
+          files: ${{ env.ZIP_PATH }}
+
+      - name: "📤 Telegram: Kirim Hasil Build (.zip)"
+        if: env.BOT_TOKEN != '' && env.CHAT_ID != ''
+        continue-on-error: true
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F chat_id="${CHAT_ID}" \
+            -F document=@"${ZIP_PATH}" \
+            -F caption="✅ Build Berhasil: ${BASE_NAME}"
+
+      - name: "📤 Telegram: Kirim Log saat Gagal"
+        if: failure() && env.BOT_TOKEN != '' && env.CHAT_ID != ''
+        continue-on-error: true
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F chat_id="${CHAT_ID}" \
+            -F document=@"kernel/build.log" \
+            -F caption="❌ Build Gagal pada ${CODENAME}. Berikut log error-nya."
