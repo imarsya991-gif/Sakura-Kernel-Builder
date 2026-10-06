@@ -90,11 +90,11 @@ jobs:
           cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
-      - name: 🛠️ Setup Clang (AOSP Mirror) & GCC
+      - name: 🛠️ Setup Clang (Proton-Clang) & GCC
         run: |
           mkdir -p toolchain/gcc64 toolchain/gcc32
           
-          # Clone AOSP Clang via GitHub (Bebas error login & anti-corrupt)
+          # Clone Proton-Clang via GitHub
           git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
           
           # GCC 64 & 32 (Cross-Compiler)
@@ -105,10 +105,28 @@ jobs:
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
 
-      - name: 🔓 Patch KernelSU-Next
+      - name: 🔓 Setup xxksu (backslashxx)
         working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+          # Setup xxksu dari backslashxx
+          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/main/kernel/setup.sh" | bash -
+
+          # Aktifkan konfigurasi KSU & Kprobes otomatis di defconfig
+          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_KERNELSU
+          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_KPROBES
+          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_HAVE_KPROBES
+          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_KPROBE_EVENTS
+
+      - name: 🩺 Fix KernelSU Drivers Reference
+        working-directory: kernel
+        run: |
+          if grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig; then
+            if [ ! -d "drivers/kernelsu" ] && [ ! -d "KernelSU" ]; then
+              echo "Folder KernelSU tidak ditemukan, menghapus baris pemanggilan di drivers/Kconfig..."
+              sed -i '/kernelsu/Id' drivers/Kconfig
+              sed -i '/kernelsu/Id' drivers/Makefile 2>/dev/null || true
+            fi
+          fi
 
       - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
