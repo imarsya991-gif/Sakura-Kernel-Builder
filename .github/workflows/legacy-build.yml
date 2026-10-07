@@ -96,28 +96,42 @@ jobs:
       - name: 🔓 Setup xxksu + manual syscall hooks
         working-directory: kernel
         run: |
-          KSU_REPO="https://github.com/backslashxx/KernelSU"
-          BR="${KSU_BRANCH}"
-          if [ -z "$BR" ]; then
-            BR=$(git ls-remote --symref "$KSU_REPO" HEAD | awk '/^ref:/{sub("refs/heads/","",$2); print $2}')
+          # 1) Cari KSU yang sudah ada di source (xxksu / kernelsu)
+          KSU_DIR=""
+          for d in xxksu kernelsu; do
+            if [ -f "drivers/$d/Kconfig" ]; then KSU_DIR="drivers/$d"; break; fi
+          done
+
+          # 2) Kalau belum ada, baru jalankan setup.sh
+          if [ -n "$KSU_DIR" ]; then
+            echo "KSU sudah ada di source: $KSU_DIR (skip setup.sh)"
+          else
+            KSU_REPO="https://github.com/backslashxx/KernelSU"
+            BR="${KSU_BRANCH}"
+            if [ -z "$BR" ]; then
+              BR=$(git ls-remote --symref "$KSU_REPO" HEAD | awk '/^ref:/{sub("refs/heads/","",$2); print $2}')
+            fi
+            echo "Branch KSU: $BR"
+            git ls-remote --exit-code --heads "$KSU_REPO" "$BR"
+            curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/${BR}/kernel/setup.sh" -o /tmp/ksu-setup.sh
+            bash /tmp/ksu-setup.sh "$BR"
+            for d in xxksu kernelsu; do
+              if [ -f "drivers/$d/Kconfig" ]; then KSU_DIR="drivers/$d"; break; fi
+            done
           fi
-          echo "Branch KSU: $BR"
-          git ls-remote --exit-code --heads "$KSU_REPO" "$BR"
 
-          curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/${BR}/kernel/setup.sh" -o /tmp/ksu-setup.sh
-          bash /tmp/ksu-setup.sh "$BR"
-
-          echo "--- cek driver KSU"
-          ls -la drivers | grep -i ksu || true
-          ls -la KernelSU 2>&1 | head || true
-          if [ ! -f drivers/kernelsu/Kconfig ]; then
-            echo "::error::drivers/kernelsu/Kconfig tidak ada, setup KSU gagal"
+          echo "--- referensi KSU di drivers/"
+          grep -n -i -E "xxksu|kernelsu" drivers/Kconfig drivers/Makefile || true
+          ls -la drivers | grep -i -E "xxksu|kernelsu" || true
+          if [ -z "$KSU_DIR" ]; then
+            echo "::error::Kconfig KSU tidak ditemukan di drivers/xxksu maupun drivers/kernelsu"
             exit 1
           fi
+          echo "KSU_DIR=$KSU_DIR"
           echo "--- simbol Kconfig KSU"
-          grep -n "^config" drivers/kernelsu/Kconfig
+          grep -n "^config" "$KSU_DIR/Kconfig"
 
-          # Hook syscall manual (scope-minimized, backslashxx/KernelSU#5)
+          # 3) Hook syscall manual (scope-minimized, backslashxx/KernelSU#5)
           if grep -q "ksu_handle_execve_sucompat\|ksu_handle_execveat" fs/exec.c; then
             echo "Hook sudah ada di source, skip patch"
           else
@@ -326,9 +340,14 @@ jobs:
             echo "Hook syscall berhasil dipasang"
           fi
 
-          # Manual hook: tanpa kprobes
-          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_KSU
-          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --disable CONFIG_KSU_WITH_KPROBES
+          # 4) Aktifkan simbol KSU utama, matikan varian kprobes (manual hook)
+          MAIN_SYM=$(grep -m1 "^config " "$KSU_DIR/Kconfig" | awk '{print $2}')
+          echo "Simbol utama: CONFIG_${MAIN_SYM}"
+          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable "CONFIG_${MAIN_SYM}"
+          for k in $(grep -E "^config .*KPROBES" "$KSU_DIR/Kconfig" | awk '{print $2}'); do
+            echo "Matikan CONFIG_$k"
+            scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --disable "CONFIG_$k"
+          done
 
       - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
