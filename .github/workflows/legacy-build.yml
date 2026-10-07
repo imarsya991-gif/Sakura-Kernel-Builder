@@ -17,7 +17,7 @@ on:
         description: "Nama defconfig"
         required: true
         type: string
-        default: "ginkgo_defconfig"
+        default: "ginkgo-stock_defconfig"
       CODENAME:
         description: "Codename device"
         required: true
@@ -28,16 +28,11 @@ on:
         required: false
         type: string
         default: "NMメPROJECT"
-      BOT_TOKEN:
-        description: "Telegram Bot Token (opsional)"
-        required: false
+      KSU_BRANCH:
+        description: "Branch backslashxx/KernelSU"
+        required: true
         type: string
-        default: ""
-      CHAT_ID:
-        description: "Telegram Chat ID (opsional)"
-        required: false
-        type: string
-        default: ""
+        default: "magic"
 
 permissions:
   contents: write
@@ -51,8 +46,9 @@ jobs:
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
       CODENAME: ${{ github.event.inputs.CODENAME }}
       EXTRAVERSION: ${{ github.event.inputs.EXTRAVERSION }}
-      BOT_TOKEN: ${{ github.event.inputs.BOT_TOKEN }}
-      CHAT_ID: ${{ github.event.inputs.CHAT_ID }}
+      KSU_BRANCH: ${{ github.event.inputs.KSU_BRANCH }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }}
       KBUILD_BUILD_USER: "github-actions"
       KBUILD_BUILD_HOST: "ci"
 
@@ -70,9 +66,6 @@ jobs:
             git curl wget zip unzip python3 python-is-python3 \
             cpio kmod rsync ccache dwarves libncurses-dev \
             device-tree-compiler
-
-          wget -q http://archive.ubuntu.com/ubuntu/pool/main/o/openssl1.0/libssl1.0.0_1.0.2n-1ubuntu5.10_amd64.deb || true
-          sudo dpkg -i libssl1.0.0_1.0.2n-1ubuntu5.10_amd64.deb 2>/dev/null || true
 
       - name: 🗃️ Setup ccache
         run: |
@@ -92,12 +85,7 @@ jobs:
 
       - name: 🛠️ Setup Clang (Proton-Clang) & GCC
         run: |
-          mkdir -p toolchain/gcc64 toolchain/gcc32
-          
-          # Clone Proton-Clang via GitHub
           git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
-          
-          # GCC 64 & 32 (Cross-Compiler)
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
 
@@ -108,10 +96,11 @@ jobs:
       - name: 🔓 Setup xxksu (backslashxx)
         working-directory: kernel
         run: |
-          # Setup xxksu dari backslashxx
-          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/main/kernel/setup.sh" | bash -
+          # -f: gagal kalau 404; unduh dulu, jangan langsung pipe ke bash
+          curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/${KSU_BRANCH}/kernel/setup.sh" -o /tmp/ksu-setup.sh
+          head -n 5 /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh "${KSU_BRANCH}"
 
-          # Aktifkan konfigurasi KSU & Kprobes otomatis di defconfig
           scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_KERNELSU
           scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_KPROBES
           scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable CONFIG_HAVE_KPROBES
@@ -131,19 +120,21 @@ jobs:
       - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
         run: |
+          set -o pipefail
           export ARCH=arm64
           export SUBARCH=arm64
           [ -n "$EXTRAVERSION" ] && export LOCALVERSION="-${EXTRAVERSION}"
 
           ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
-          make $ARGS "$KERNEL_CONFIG"
-          
-          # Enable Full LTO
+          make $ARGS "$KERNEL_CONFIG" 2>&1 | tee build.log
+
+          # Full LTO = LTO_CLANG aktif, THINLTO mati
           scripts/config --file out/.config --enable CONFIG_LTO_CLANG
           scripts/config --file out/.config --disable CONFIG_THINLTO
-          
-          make -j$(nproc --all) $ARGS 2>&1 | tee build.log
+          make $ARGS olddefconfig 2>&1 | tee -a build.log
+
+          make -j$(nproc --all) $ARGS 2>&1 | tee -a build.log
 
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
           [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" \) | head -n1)
