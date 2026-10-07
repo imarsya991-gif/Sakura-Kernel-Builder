@@ -129,11 +129,11 @@ jobs:
           # verifier.c memanggil bpf_jit_blinding_enabled(), yang hanya dideklarasi bila BPF_JIT aktif
           scripts/config --file "$CFG" --enable CONFIG_BPF_JIT
 
-          # fs/proc/cmdline.c (patch susfs) butuh COMMAND_LINE_SIZE tapi tidak meng-include asm/setup.h
-          if grep -q "COMMAND_LINE_SIZE" fs/proc/cmdline.c && ! grep -q "asm/setup.h" fs/proc/cmdline.c; then
-            sed -i '0,/^#include/s//#include <asm\/setup.h>\n#include/' fs/proc/cmdline.c
-            echo "Menambah #include <asm/setup.h> ke fs/proc/cmdline.c"
-            head -n 12 fs/proc/cmdline.c
+          # fs/proc/cmdline.c (patch susfs) memakai COMMAND_LINE_SIZE tanpa include yang cukup
+          echo "--- fs/proc/cmdline.c (awal)"; head -n 14 fs/proc/cmdline.c
+          if grep -q "COMMAND_LINE_SIZE" fs/proc/cmdline.c && ! grep -q "ksu-ci-fix" fs/proc/cmdline.c; then
+            sed -i '1i /* ksu-ci-fix */\n#include <asm/setup.h>\n#ifndef COMMAND_LINE_SIZE\n#define COMMAND_LINE_SIZE 2048\n#endif' fs/proc/cmdline.c
+            echo "--- fs/proc/cmdline.c (setelah)"; head -n 8 fs/proc/cmdline.c
           fi
 
       - name: 🔨 Build Kernel (Full LTO)
@@ -164,7 +164,17 @@ jobs:
             }
           done
 
-          make -k -j$(nproc --all) $ARGS 2>&1 | tee -a build.log
+          set +e
+          make -k -j$(nproc --all) $ARGS Image.gz dtbs 2>&1 | tee -a build.log
+          set -e
+
+          # Beberapa dtb papan lain (external-codec) rusak di source ini; pakai dtb yang berhasil saja
+          BOOT=out/arch/arm64/boot
+          if [ -f "$BOOT/Image.gz" ]; then
+            DTBS=$(find "$BOOT/dts" -name '*.dtb' | sort)
+            echo "Jumlah dtb yang berhasil: $(echo "$DTBS" | grep -c .)"
+            cat "$BOOT/Image.gz" $DTBS > "$BOOT/Image.gz-dtb"
+          fi
 
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
           [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" \) | head -n1)
@@ -206,19 +216,48 @@ jobs:
           files: ${{ env.ZIP_PATH }}
 
       - name: "📤 Telegram: Kirim Hasil Build (.zip)"
-        if: env.BOT_TOKEN != '' && env.CHAT_ID != ''
         continue-on-error: true
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "::warning::BOT_TOKEN/CHAT_ID kosong (secret belum dibuat atau namanya salah), lewati Telegram"
+            exit 0
+          fi
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
             -F chat_id="${CHAT_ID}" \
             -F document=@"${ZIP_PATH}" \
             -F caption="✅ Build Berhasil: ${BASE_NAME}"
+          echo
 
       - name: "📤 Telegram: Kirim Log saat Gagal"
-        if: failure() && env.BOT_TOKEN != '' && env.CHAT_ID != ''
+        if: failure()
         continue-on-error: true
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "::warning::BOT_TOKEN/CHAT_ID kosong (secret belum dibuat atau namanya salah), log tidak dikirim"
+            exit 0
+          fi
+          LOG="kernel/build.log"
+          if [ ! -f "$LOG" ]; then
+            echo "build.log tidak ada (gagal sebelum tahap build), kirim pesan teks saja"
+            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              -d chat_id="${CHAT_ID}" \
+              -d text="❌ Build Gagal pada ${CODENAME} sebelum tahap build. Cek tab Actions."
+            echo
+            exit 0
+          fi
+
+          # Ringkasan error (kecil) + log lengkap (gzip)
+          grep -nE "error:|\*\*\* |Error [0-9]+$" "$LOG" | head -n 80 > errors.txt || true
+          [ -s errors.txt ] || tail -n 100 "$LOG" > errors.txt
+          gzip -9 -c "$LOG" > build-log.gz
+
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
             -F chat_id="${CHAT_ID}" \
-            -F document=@"kernel/build.log" \
-            -F caption="❌ Build Gagal pada ${CODENAME}. Berikut log error-nya."
+            -F document=@"errors.txt" \
+            -F caption="❌ Build Gagal pada ${CODENAME}. Ringkasan error."
+          echo
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F chat_id="${CHAT_ID}" \
+            -F document=@"build-log.gz" \
+            -F caption="Log lengkap (gzip)"
+          echo
