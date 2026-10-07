@@ -86,22 +86,23 @@ jobs:
             -d disable_web_page_preview=true
           echo
 
-      - name: 🧹 Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune --all --force || true
+      - name: 💾 Maximize build space (disk besar + swap 32GB untuk Full LTO)
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 32768
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: ${{ github.workspace }}
 
-      - name: 💾 Tambah swap 16GB (Full LTO butuh RAM besar)
+      - name: 📊 Cek RAM, swap, dan disk
         run: |
+          nproc
           free -h
-          sudo swapoff -a || true
-          sudo rm -f /mnt/swapfile
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -h
-          df -h /
+          swapon --show
+          df -h "$GITHUB_WORKSPACE" /
 
       - name: 📦 Install build dependencies
         run: |
@@ -189,7 +190,36 @@ jobs:
           export SUBARCH=arm64
           [ -n "$EXTRAVERSION" ] && export LOCALVERSION="-${EXTRAVERSION}"
 
-          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
+          # ThinLTO + lld baru menolak opsi import-instr-limit yang dobel; pakai pembungkus yang membuang duplikatnya
+          LD_BIN=ld.lld
+          if [ "$LTO_MODE" = "thin" ]; then
+            echo "--- import-instr-limit di Makefile"
+            grep -rn "import-instr-limit" Makefile arch/arm64/Makefile arch/arm64/kernel/vdso/Makefile scripts/Makefile* 2>/dev/null || true
+            cat > /tmp/ld-dedup.sh << 'LD_EOF'
+          #!/bin/bash
+          seen=0
+          args=()
+          while [ $# -gt 0 ]; do
+            if [ "$1" = "-mllvm" ] && [ $# -ge 2 ] && [[ "$2" == *import-instr-limit=* ]]; then
+              if [ $seen -eq 0 ]; then args+=("$1" "$2"); seen=1; fi
+              shift 2
+              continue
+            fi
+            if [[ "$1" == *import-instr-limit=* ]]; then
+              if [ $seen -eq 0 ]; then args+=("$1"); seen=1; fi
+              shift
+              continue
+            fi
+            args+=("$1")
+            shift
+          done
+          exec ld.lld "${args[@]}"
+          LD_EOF
+            chmod +x /tmp/ld-dedup.sh
+            LD_BIN=/tmp/ld-dedup.sh
+          fi
+
+          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=${LD_BIN} AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
           make $ARGS "$KERNEL_CONFIG" $CONFIG_FRAGMENTS 2>&1 | tee build.log
 
