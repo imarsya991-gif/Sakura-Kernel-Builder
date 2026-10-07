@@ -109,7 +109,7 @@ jobs:
           echo "--- Kconfig KSU yang ter-source"
           grep -rn --include='Kconfig*' -E 'source ".*(xxksu|kernelsu)' . || true
 
-      - name: 🧩 Isi CPU mask (LITTLE/BIG) di defconfig
+      - name: 🧩 Fix defconfig & source (CPU mask, BPF_JIT, cmdline.c)
         working-directory: kernel
         run: |
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
@@ -126,6 +126,15 @@ jobs:
             case "$val" in 0x*|0X*) val=$((val));; esac
             echo "CONFIG_${sym}=${val}" | tee -a "$CFG"
           done
+          # verifier.c memanggil bpf_jit_blinding_enabled(), yang hanya dideklarasi bila BPF_JIT aktif
+          scripts/config --file "$CFG" --enable CONFIG_BPF_JIT
+
+          # fs/proc/cmdline.c (patch susfs) butuh COMMAND_LINE_SIZE tapi tidak meng-include asm/setup.h
+          if grep -q "COMMAND_LINE_SIZE" fs/proc/cmdline.c && ! grep -q "asm/setup.h" fs/proc/cmdline.c; then
+            sed -i '0,/^#include/s//#include <asm\/setup.h>\n#include/' fs/proc/cmdline.c
+            echo "Menambah #include <asm/setup.h> ke fs/proc/cmdline.c"
+            head -n 12 fs/proc/cmdline.c
+          fi
 
       - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
@@ -144,6 +153,8 @@ jobs:
           scripts/config --file out/.config --disable CONFIG_THINLTO
           make $ARGS olddefconfig 2>&1 | tee -a build.log
 
+          echo "--- CONFIG_BPF* di out/.config"
+          grep -n "CONFIG_BPF" out/.config || true
           echo "--- CONFIG_KSU* di out/.config"
           grep -n "CONFIG_KSU" out/.config || true
           for sym in KSU_XXKSU KSU; do
@@ -153,7 +164,7 @@ jobs:
             }
           done
 
-          make -j$(nproc --all) $ARGS 2>&1 | tee -a build.log
+          make -k -j$(nproc --all) $ARGS 2>&1 | tee -a build.log
 
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
           [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" \) | head -n1)
