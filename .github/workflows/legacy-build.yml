@@ -113,7 +113,7 @@ jobs:
         working-directory: kernel
         run: |
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
-          for pair in "LITTLE_CPU_MASK:0x0f" "BIG_CPU_MASK:0xf0"; do
+          for pair in "LITTLE_CPU_MASK:15" "BIG_CPU_MASK:240"; do
             sym="${pair%%:*}"; def="${pair##*:}"
             if grep -q "^CONFIG_${sym}=" "$CFG"; then
               echo "CONFIG_${sym} sudah ada di defconfig"
@@ -122,6 +122,8 @@ jobs:
             # Ambil nilai dari defconfig ginkgo lain kalau ada, kalau tidak pakai default
             val=$(grep -h "^CONFIG_${sym}=" arch/arm64/configs/*ginkgo*defconfig 2>/dev/null | head -n1 | cut -d= -f2)
             [ -z "$val" ] && val="$def"
+            # Kconfig-nya bertipe int: hex (0x..) harus diubah ke desimal
+            case "$val" in 0x*|0X*) val=$((val));; esac
             echo "CONFIG_${sym}=${val}" | tee -a "$CFG"
           done
 
