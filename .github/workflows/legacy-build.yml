@@ -1,4 +1,4 @@
-name: Manual Build Kernel - NM PROJECT
+name: Redmi Note 8 - NM PROJECT
 
 on:
   workflow_dispatch:
@@ -87,247 +87,45 @@ jobs:
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
 
-      - name: 🔓 Cek xxksu bawaan source + hook syscall
+      - name: 🔓 Setup xxksu (bawaan source, mode syscall table)
         working-directory: kernel
         run: |
-          # Source Flop sudah membawa xxksu -> TIDAK pakai setup.sh
-          echo "--- .gitmodules"; cat .gitmodules 2>/dev/null || true
-          echo "--- submodule"; git submodule status || true
-          for d in xxksu kernelsu; do
-            echo "--- isi drivers/$d"; ls -la "drivers/$d" 2>&1 | head -20
-          done
-          echo "--- referensi di drivers/Kconfig & Makefile"
-          grep -n -i -E "xxksu|kernelsu" drivers/Kconfig drivers/Makefile || true
-          echo "--- definisi simbol KSU di Kconfig"
-          grep -rn --include='Kconfig*' -A10 "^config KSU" drivers | head -60 || true
+          KCONF="drivers/xxksu/kernel/Kconfig"
+          [ -f "$KCONF" ] || { echo "::error::$KCONF tidak ada"; exit 1; }
+
+          echo "--- definisi simbol KSU (seluruh tree)"
+          grep -rn --include='Kconfig*' -E "^(menu)?config KSU" . | grep -v "/manager/" || true
+          echo "--- yang meng-source Kconfig KSU"
+          grep -rn --include='Kconfig*' -E 'source ".*(xxksu|kernelsu)' . || true
           echo "--- KSU di defconfig"
           grep -n -i ksu "arch/arm64/configs/$KERNEL_CONFIG" || true
 
-          # Komentari 'source' Kconfig KSU yang filenya tidak ada
-          for f in $(grep -oE 'source "drivers/[^"]*(xxksu|kernelsu)[^"]*Kconfig"' drivers/Kconfig | sed 's/source "\(.*\)"/\1/'); do
-            if [ ! -f "$f" ]; then
-              echo "::warning::$f tidak ada, baris source dikomentari"
-              sed -i "\|source \"$f\"|s|^|# |" drivers/Kconfig
-            fi
-          done
-
-          if ! grep -rqs --include='Kconfig*' "^config KSU_XXKSU" drivers; then
-            echo "::error::Simbol KSU_XXKSU tidak didefinisikan di Kconfig mana pun"
+          # Sambungkan Kconfig xxksu ke drivers/Kconfig bila belum
+          : > /tmp/ksu.kconfig
+          if ! grep -rqs --include='Kconfig*' "^config KSU_XXKSU" .; then
+            printf 'config KSU_XXKSU\n\tbool "KernelSU (xxksu)"\n\tdefault n\n\n' >> /tmp/ksu.kconfig
+          fi
+          if ! grep -qs 'source "drivers/xxksu/kernel/Kconfig"' drivers/Kconfig; then
+            printf 'source "drivers/xxksu/kernel/Kconfig"\n\n' >> /tmp/ksu.kconfig
+          fi
+          if [ -s /tmp/ksu.kconfig ]; then
+            sed -i '/^menu "Device Drivers"/r /tmp/ksu.kconfig' drivers/Kconfig
+            echo "--- drivers/Kconfig setelah disambung"
+            sed -n '1,15p' drivers/Kconfig
+          fi
+          grep -q 'xxksu/kernel/Kconfig' drivers/Kconfig || {
+            echo "::error::Gagal menyambung Kconfig xxksu ke drivers/Kconfig"
             exit 1
-          fi
+          }
 
-          # Hook syscall manual (scope-minimized, backslashxx/KernelSU#5)
-          if grep -q "ksu_handle_execve_sucompat\|ksu_handle_execveat" fs/exec.c; then
-            echo "Hook sudah ada di source, skip patch"
-          else
-            cat > /tmp/ksu-hooks.patch << 'PATCH_EOF'
-          diff --git a/drivers/input/input.c b/drivers/input/input.c
-          --- a/drivers/input/input.c
-          +++ b/drivers/input/input.c
-          @@ -377,10 +377,19 @@ static int input_get_disposition(struct input_dev *dev,
-           	return disposition;
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern bool ksu_input_hook __read_mostly;
-          +extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
-          +#endif
-          +
-           static void input_handle_event(struct input_dev *dev,
-           			       unsigned int type, unsigned int code, int value)
-           {
-           	int disposition = input_get_disposition(dev, type, code, &value);
-          +#ifdef CONFIG_KSU
-          +	if (unlikely(ksu_input_hook))
-          +		ksu_handle_input_handle_event(&type, &code, &value);
-          +#endif
-
-           	if (disposition != INPUT_IGNORE_EVENT && type != EV_SYN)
-           		add_input_randomness(type, code, value);
-          diff --git a/fs/devpts/inode.c b/fs/devpts/inode.c
-          --- a/fs/devpts/inode.c
-          +++ b/fs/devpts/inode.c
-          @@ -602,6 +602,10 @@ struct dentry *devpts_pty_new(struct pts_fs_info *fsi, int index, void *priv)
-           	return dentry;
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern int ksu_handle_devpts(struct inode*);
-          +#endif
-          +
-           /**
-            * devpts_get_priv -- get private data for a slave
-            * @pts_inode: inode of the slave
-          @@ -610,6 +614,9 @@ struct dentry *devpts_pty_new(struct pts_fs_info *fsi, int index, void *priv)
-            */
-           void *devpts_get_priv(struct dentry *dentry)
-           {
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_devpts(dentry->d_inode);
-          +#endif
-           	if (dentry->d_sb->s_magic != DEVPTS_SUPER_MAGIC)
-           		return NULL;
-           	return dentry->d_fsdata;
-          diff --git a/fs/exec.c b/fs/exec.c
-          --- a/fs/exec.c
-          +++ b/fs/exec.c
-          @@ -1712,6 +1712,12 @@ static int exec_binprm(struct linux_binprm *bprm)
-           	return ret;
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern bool ksu_execveat_hook __read_mostly;
-          +extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
-          +			void *envp, int *flags);
-          +#endif
-          +
-           /*
-            * sys_execve() executes a new program.
-            */
-          @@ -1726,6 +1732,11 @@ static int do_execveat_common(int fd, struct filename *filename,
-           	struct files_struct *displaced;
-           	int retval;
-
-          +#ifdef CONFIG_KSU
-          +	if (unlikely(ksu_execveat_hook))
-          +		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-          +#endif
-          +
-           	if (IS_ERR(filename))
-           		return PTR_ERR(filename);
-
-          @@ -1968,11 +1979,22 @@ void set_dumpable(struct mm_struct *mm, int value)
-           	} while (cmpxchg(&mm->flags, old, new) != old);
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,
-          +			       void *__never_use_argv, void *__never_use_envp,
-          +			       int *__never_use_flags);
-          +int at_fdcwd = AT_FDCWD;
-          +#endif
-          +
-           SYSCALL_DEFINE3(execve,
-           		const char __user *, filename,
-           		const char __user *const __user *, argv,
-           		const char __user *const __user *, envp)
-           {
-          +#ifdef CONFIG_KSU
-          +	if (!ksu_execveat_hook)
-          +		ksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL);
-          +#endif
-           	return do_execve(getname(filename), argv, envp);
-           }
-
-          @@ -1994,6 +2016,10 @@ COMPAT_SYSCALL_DEFINE3(execve, const char __user *, filename,
-           	const compat_uptr_t __user *, argv,
-           	const compat_uptr_t __user *, envp)
-           {
-          +#ifdef CONFIG_KSU
-          +	if (!ksu_execveat_hook)
-          +		ksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL); /* 32-bit su support */
-          +#endif
-           	return compat_do_execve(getname(filename), argv, envp);
-           }
-          diff --git a/fs/open.c b/fs/open.c
-          --- a/fs/open.c
-          +++ b/fs/open.c
-          @@ -354,6 +354,11 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
-           	return error;
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
-          +					    int *flags);
-          +#endif
-          +
-           /*
-            * access() needs to use the real uid/gid, not the effective uid/gid.
-            * We do this by temporarily clearing all FS-related capabilities and
-          @@ -369,6 +374,10 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
-           	int res;
-           	unsigned int lookup_flags = LOOKUP_FOLLOW;
-
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-          +#endif
-          +
-           	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
-           		return -EINVAL;
-
-          diff --git a/fs/read_write.c b/fs/read_write.c
-          --- a/fs/read_write.c
-          +++ b/fs/read_write.c
-          @@ -568,6 +568,12 @@ static inline void file_pos_write(struct file *file, loff_t pos)
-           		file->f_pos = pos;
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern bool ksu_vfs_read_hook __read_mostly;
-          +extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,
-          +			size_t *count_ptr);
-          +#endif
-          +
-           SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-           {
-           	struct fd f = fdget_pos(fd);
-          @@ -575,6 +581,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
-
-           	if (f.file) {
-           		loff_t pos = file_pos_read(f.file);
-          +#ifdef CONFIG_KSU
-          +		if (unlikely(ksu_vfs_read_hook))
-          +			ksu_handle_sys_read(fd, &buf, &count);
-          +#endif
-           		ret = vfs_read(f.file, buf, count, &pos);
-           		if (ret >= 0)
-           			file_pos_write(f.file, pos);
-          diff --git a/fs/stat.c b/fs/stat.c
-          --- a/fs/stat.c
-          +++ b/fs/stat.c
-          @@ -353,6 +353,10 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
-           	return cp_new_stat(&stat, statbuf);
-           }
-
-          +#ifdef CONFIG_KSU
-          +extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
-          +#endif
-          +
-           #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
-           SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-           		struct stat __user *, statbuf, int, flag)
-          @@ -360,6 +364,9 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
-           	struct kstat stat;
-           	int error;
-
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_stat(&dfd, &filename, &flag);
-          +#endif
-           	error = vfs_fstatat(dfd, filename, &stat, flag);
-           	if (error)
-           		return error;
-          @@ -504,6 +511,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
-           	struct kstat stat;
-           	int error;
-
-          +#ifdef CONFIG_KSU
-          +	ksu_handle_stat(&dfd, &filename, &flag); /* 32-bit su support */
-          +#endif
-           	error = vfs_fstatat(dfd, filename, &stat, flag);
-           	if (error)
-           		return error;
-          PATCH_EOF
-            git apply --recount --ignore-whitespace --check /tmp/ksu-hooks.patch || {
-              echo "::error::Patch hook tidak cocok dengan source ini"
-              exit 1
-            }
-            git apply --recount --ignore-whitespace /tmp/ksu-hooks.patch
-            echo "Hook syscall berhasil dipasang"
-          fi
-
-          # Pilih xxksu lewat defconfig
-          scripts/config --file "arch/arm64/configs/$KERNEL_CONFIG" --enable CONFIG_KSU_XXKSU
-          scripts/config --file "arch/arm64/configs/$KERNEL_CONFIG" --disable CONFIG_KSU_NEXT
+          # Mode syscall table bawaan xxksu (tanpa patch hook manual)
+          CFG="arch/arm64/configs/$KERNEL_CONFIG"
+          for sym in KSU_XXKSU KSU KSU_TAMPER_SYSCALL_TABLE; do
+            scripts/config --file "$CFG" --enable "CONFIG_$sym"
+          done
+          for sym in KSU_NEXT KSU_KPROBES_KSUD KSU_HACK_ARM64_BRANCH_LINK; do
+            scripts/config --file "$CFG" --disable "CONFIG_$sym"
+          done
 
       - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
@@ -348,10 +146,12 @@ jobs:
 
           echo "--- CONFIG_KSU* di out/.config"
           grep -n "CONFIG_KSU" out/.config || true
-          grep -q "^CONFIG_KSU_XXKSU=y" out/.config || {
-            echo "::error::CONFIG_KSU_XXKSU tidak aktif (dependensi Kconfig belum terpenuhi?)"
-            exit 1
-          }
+          for sym in KSU_XXKSU KSU KSU_TAMPER_SYSCALL_TABLE; do
+            grep -q "^CONFIG_${sym}=y" out/.config || {
+              echo "::error::CONFIG_${sym} tidak aktif (dependensi Kconfig belum terpenuhi?)"
+              exit 1
+            }
+          done
 
           make -j$(nproc --all) $ARGS 2>&1 | tee -a build.log
 
