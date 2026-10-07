@@ -28,11 +28,6 @@ on:
         required: false
         type: string
         default: "NMメPROJECT"
-      KSU_BRANCH:
-        description: "Branch backslashxx/KernelSU (kosongkan = default branch otomatis)"
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: write
@@ -46,7 +41,6 @@ jobs:
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
       CODENAME: ${{ github.event.inputs.CODENAME }}
       EXTRAVERSION: ${{ github.event.inputs.EXTRAVERSION }}
-      KSU_BRANCH: ${{ github.event.inputs.KSU_BRANCH }}
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       CHAT_ID: ${{ secrets.CHAT_ID }}
       KBUILD_BUILD_USER: "github-actions"
@@ -93,45 +87,36 @@ jobs:
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
 
-      - name: 🔓 Setup xxksu + manual syscall hooks
+      - name: 🔓 Cek xxksu bawaan source + hook syscall
         working-directory: kernel
         run: |
-          # 1) Cari KSU yang sudah ada di source (xxksu / kernelsu)
-          KSU_DIR=""
+          # Source Flop sudah membawa xxksu -> TIDAK pakai setup.sh
+          echo "--- .gitmodules"; cat .gitmodules 2>/dev/null || true
+          echo "--- submodule"; git submodule status || true
           for d in xxksu kernelsu; do
-            if [ -f "drivers/$d/Kconfig" ]; then KSU_DIR="drivers/$d"; break; fi
+            echo "--- isi drivers/$d"; ls -la "drivers/$d" 2>&1 | head -20
+          done
+          echo "--- referensi di drivers/Kconfig & Makefile"
+          grep -n -i -E "xxksu|kernelsu" drivers/Kconfig drivers/Makefile || true
+          echo "--- definisi simbol KSU di Kconfig"
+          grep -rn --include='Kconfig*' -A10 "^config KSU" drivers | head -60 || true
+          echo "--- KSU di defconfig"
+          grep -n -i ksu "arch/arm64/configs/$KERNEL_CONFIG" || true
+
+          # Komentari 'source' Kconfig KSU yang filenya tidak ada
+          for f in $(grep -oE 'source "drivers/[^"]*(xxksu|kernelsu)[^"]*Kconfig"' drivers/Kconfig | sed 's/source "\(.*\)"/\1/'); do
+            if [ ! -f "$f" ]; then
+              echo "::warning::$f tidak ada, baris source dikomentari"
+              sed -i "\|source \"$f\"|s|^|# |" drivers/Kconfig
+            fi
           done
 
-          # 2) Kalau belum ada, baru jalankan setup.sh
-          if [ -n "$KSU_DIR" ]; then
-            echo "KSU sudah ada di source: $KSU_DIR (skip setup.sh)"
-          else
-            KSU_REPO="https://github.com/backslashxx/KernelSU"
-            BR="${KSU_BRANCH}"
-            if [ -z "$BR" ]; then
-              BR=$(git ls-remote --symref "$KSU_REPO" HEAD | awk '/^ref:/{sub("refs/heads/","",$2); print $2}')
-            fi
-            echo "Branch KSU: $BR"
-            git ls-remote --exit-code --heads "$KSU_REPO" "$BR"
-            curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/${BR}/kernel/setup.sh" -o /tmp/ksu-setup.sh
-            bash /tmp/ksu-setup.sh "$BR"
-            for d in xxksu kernelsu; do
-              if [ -f "drivers/$d/Kconfig" ]; then KSU_DIR="drivers/$d"; break; fi
-            done
-          fi
-
-          echo "--- referensi KSU di drivers/"
-          grep -n -i -E "xxksu|kernelsu" drivers/Kconfig drivers/Makefile || true
-          ls -la drivers | grep -i -E "xxksu|kernelsu" || true
-          if [ -z "$KSU_DIR" ]; then
-            echo "::error::Kconfig KSU tidak ditemukan di drivers/xxksu maupun drivers/kernelsu"
+          if ! grep -rqs --include='Kconfig*' "^config KSU_XXKSU" drivers; then
+            echo "::error::Simbol KSU_XXKSU tidak didefinisikan di Kconfig mana pun"
             exit 1
           fi
-          echo "KSU_DIR=$KSU_DIR"
-          echo "--- simbol Kconfig KSU"
-          grep -n "^config" "$KSU_DIR/Kconfig"
 
-          # 3) Hook syscall manual (scope-minimized, backslashxx/KernelSU#5)
+          # Hook syscall manual (scope-minimized, backslashxx/KernelSU#5)
           if grep -q "ksu_handle_execve_sucompat\|ksu_handle_execveat" fs/exec.c; then
             echo "Hook sudah ada di source, skip patch"
           else
@@ -340,14 +325,9 @@ jobs:
             echo "Hook syscall berhasil dipasang"
           fi
 
-          # 4) Aktifkan simbol KSU utama, matikan varian kprobes (manual hook)
-          MAIN_SYM=$(grep -m1 "^config " "$KSU_DIR/Kconfig" | awk '{print $2}')
-          echo "Simbol utama: CONFIG_${MAIN_SYM}"
-          scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --enable "CONFIG_${MAIN_SYM}"
-          for k in $(grep -E "^config .*KPROBES" "$KSU_DIR/Kconfig" | awk '{print $2}'); do
-            echo "Matikan CONFIG_$k"
-            scripts/config --file arch/arm64/configs/$KERNEL_CONFIG --disable "CONFIG_$k"
-          done
+          # Pilih xxksu lewat defconfig
+          scripts/config --file "arch/arm64/configs/$KERNEL_CONFIG" --enable CONFIG_KSU_XXKSU
+          scripts/config --file "arch/arm64/configs/$KERNEL_CONFIG" --disable CONFIG_KSU_NEXT
 
       - name: 🔨 Build Kernel (Full LTO)
         working-directory: kernel
@@ -365,6 +345,13 @@ jobs:
           scripts/config --file out/.config --enable CONFIG_LTO_CLANG
           scripts/config --file out/.config --disable CONFIG_THINLTO
           make $ARGS olddefconfig 2>&1 | tee -a build.log
+
+          echo "--- CONFIG_KSU* di out/.config"
+          grep -n "CONFIG_KSU" out/.config || true
+          grep -q "^CONFIG_KSU_XXKSU=y" out/.config || {
+            echo "::error::CONFIG_KSU_XXKSU tidak aktif (dependensi Kconfig belum terpenuhi?)"
+            exit 1
+          }
 
           make -j$(nproc --all) $ARGS 2>&1 | tee -a build.log
 
