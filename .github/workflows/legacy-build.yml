@@ -1,4 +1,4 @@
-name: Redmi Note 8 - NM PROJECT
+name: Manual Build Kernel - NM PROJECT
 
 on:
   workflow_dispatch:
@@ -18,6 +18,11 @@ on:
         required: true
         type: string
         default: "ginkgo-stock_defconfig"
+      CONFIG_FRAGMENTS:
+        description: "Fragment config yang di-merge (pisah spasi), mis: xxksu.config droidspaces.config"
+        required: false
+        type: string
+        default: "xxksu.config"
       CODENAME:
         description: "Codename device"
         required: true
@@ -39,6 +44,7 @@ jobs:
       KERNEL_SOURCE: ${{ github.event.inputs.KERNEL_SOURCE }}
       KERNEL_BRANCH: ${{ github.event.inputs.KERNEL_BRANCH }}
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
+      CONFIG_FRAGMENTS: ${{ github.event.inputs.CONFIG_FRAGMENTS }}
       CODENAME: ${{ github.event.inputs.CODENAME }}
       EXTRAVERSION: ${{ github.event.inputs.EXTRAVERSION }}
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -87,44 +93,36 @@ jobs:
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
 
-      - name: 🔓 Setup xxksu (bawaan source, mode syscall table)
+      - name: 📋 Cek config fragment (xxksu bawaan source)
         working-directory: kernel
         run: |
-          KCONF="drivers/xxksu/kernel/Kconfig"
-          [ -f "$KCONF" ] || { echo "::error::$KCONF tidak ada"; exit 1; }
-
-          echo "--- definisi simbol KSU (seluruh tree)"
-          grep -rn --include='Kconfig*' -E "^(menu)?config KSU" . | grep -v "/manager/" || true
-          echo "--- yang meng-source Kconfig KSU"
-          grep -rn --include='Kconfig*' -E 'source ".*(xxksu|kernelsu)' . || true
-          echo "--- KSU di defconfig"
-          grep -n -i ksu "arch/arm64/configs/$KERNEL_CONFIG" || true
-
-          # Sambungkan Kconfig xxksu ke drivers/Kconfig bila belum
-          : > /tmp/ksu.kconfig
-          if ! grep -rqs --include='Kconfig*' "^config KSU_XXKSU" .; then
-            printf 'config KSU_XXKSU\n\tbool "KernelSU (xxksu)"\n\tdefault n\n\n' >> /tmp/ksu.kconfig
-          fi
-          if ! grep -qs 'source "drivers/xxksu/kernel/Kconfig"' drivers/Kconfig; then
-            printf 'source "drivers/xxksu/kernel/Kconfig"\n\n' >> /tmp/ksu.kconfig
-          fi
-          if [ -s /tmp/ksu.kconfig ]; then
-            sed -i '/^menu "Device Drivers"/r /tmp/ksu.kconfig' drivers/Kconfig
-            echo "--- drivers/Kconfig setelah disambung"
-            sed -n '1,15p' drivers/Kconfig
-          fi
-          grep -q 'xxksu/kernel/Kconfig' drivers/Kconfig || {
-            echo "::error::Gagal menyambung Kconfig xxksu ke drivers/Kconfig"
-            exit 1
-          }
-
-          # Mode syscall table bawaan xxksu (tanpa patch hook manual)
-          CFG="arch/arm64/configs/$KERNEL_CONFIG"
-          for sym in KSU_XXKSU KSU KSU_TAMPER_SYSCALL_TABLE; do
-            scripts/config --file "$CFG" --enable "CONFIG_$sym"
+          CFG_DIR="arch/arm64/configs"
+          for f in $CONFIG_FRAGMENTS; do
+            if [ ! -f "$CFG_DIR/$f" ]; then
+              echo "::error::$CFG_DIR/$f tidak ada"
+              ls "$CFG_DIR"
+              exit 1
+            fi
+            echo "=== isi $f"
+            cat "$CFG_DIR/$f"
           done
-          for sym in KSU_NEXT KSU_KPROBES_KSUD KSU_HACK_ARM64_BRANCH_LINK; do
-            scripts/config --file "$CFG" --disable "CONFIG_$sym"
+          echo "--- Kconfig KSU yang ter-source"
+          grep -rn --include='Kconfig*' -E 'source ".*(xxksu|kernelsu)' . || true
+
+      - name: 🧩 Isi CPU mask (LITTLE/BIG) di defconfig
+        working-directory: kernel
+        run: |
+          CFG="arch/arm64/configs/$KERNEL_CONFIG"
+          for pair in "LITTLE_CPU_MASK:0x0f" "BIG_CPU_MASK:0xf0"; do
+            sym="${pair%%:*}"; def="${pair##*:}"
+            if grep -q "^CONFIG_${sym}=" "$CFG"; then
+              echo "CONFIG_${sym} sudah ada di defconfig"
+              continue
+            fi
+            # Ambil nilai dari defconfig ginkgo lain kalau ada, kalau tidak pakai default
+            val=$(grep -h "^CONFIG_${sym}=" arch/arm64/configs/*ginkgo*defconfig 2>/dev/null | head -n1 | cut -d= -f2)
+            [ -z "$val" ] && val="$def"
+            echo "CONFIG_${sym}=${val}" | tee -a "$CFG"
           done
 
       - name: 🔨 Build Kernel (Full LTO)
@@ -137,7 +135,7 @@ jobs:
 
           ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
-          make $ARGS "$KERNEL_CONFIG" 2>&1 | tee build.log
+          make $ARGS "$KERNEL_CONFIG" $CONFIG_FRAGMENTS 2>&1 | tee build.log
 
           # Full LTO = LTO_CLANG aktif, THINLTO mati
           scripts/config --file out/.config --enable CONFIG_LTO_CLANG
@@ -146,7 +144,7 @@ jobs:
 
           echo "--- CONFIG_KSU* di out/.config"
           grep -n "CONFIG_KSU" out/.config || true
-          for sym in KSU_XXKSU KSU KSU_TAMPER_SYSCALL_TABLE; do
+          for sym in KSU_XXKSU KSU; do
             grep -q "^CONFIG_${sym}=y" out/.config || {
               echo "::error::CONFIG_${sym} tidak aktif (dependensi Kconfig belum terpenuhi?)"
               exit 1
