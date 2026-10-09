@@ -1,3 +1,4 @@
+
 name: Manual Build Kernel - NM PROJECT (lavender 4.4)
 
 on:
@@ -20,20 +21,25 @@ on:
         required: false
         type: string
         default: ""
+      XXKSU:
+        description: "Aktifkan xxksu (hook syscall manual, tanpa kprobes) lewat defconfig"
+        required: true
+        type: boolean
+        default: true
       ANTI_FLICKER:
         description: "Patch anti kedip LCD (ESD check off, LPM off, KCAL on, idle_pc off)"
         required: true
         type: boolean
         default: true
       LTO_MODE:
-        description: "Mode LTO (4.4 biasanya tidak support, pakai none kecuali source punya LTO_CLANG)"
+        description: "Mode LTO (full/thin hanya jalan kalau source punya CONFIG_LTO_CLANG; kalau tidak, diabaikan)"
         required: true
         type: choice
         options:
           - none
           - thin
           - full
-        default: none
+        default: thin
       CODENAME:
         description: "Codename device"
         required: true
@@ -57,6 +63,7 @@ jobs:
       KERNEL_BRANCH: ${{ github.event.inputs.KERNEL_BRANCH }}
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
       CONFIG_FRAGMENTS: ${{ github.event.inputs.CONFIG_FRAGMENTS }}
+      XXKSU: ${{ github.event.inputs.XXKSU }}
       ANTI_FLICKER: ${{ github.event.inputs.ANTI_FLICKER }}
       LTO_MODE: ${{ github.event.inputs.LTO_MODE }}
       CODENAME: ${{ github.event.inputs.CODENAME }}
@@ -188,6 +195,44 @@ jobs:
             cat "$CFG_DIR/$f"
           done
 
+      # Integrasi xxksu ke source via setup.sh (credit: @linx3141)
+      - name: 📥 Integrasi xxksu (curl setup.sh)
+        if: ${{ github.event.inputs.XXKSU == 'true' }}
+        working-directory: kernel
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
+          echo "--- hasil integrasi"
+          ls -la drivers/ | grep -i -E "kernelsu|xxksu" || true
+          grep -n -i "kernelsu" drivers/Makefile drivers/Kconfig || true
+
+      # xxksu cukup lewat defconfig (tanpa fragment). Mode syscall = manual hook, KPROBES mati.
+      # Hook manual (execve, faccessat, stat, read, input, devpts) harus sudah ada di source.
+      - name: 🛡️ Aktifkan xxksu (syscall hook) via defconfig
+        if: ${{ github.event.inputs.XXKSU == 'true' }}
+        working-directory: kernel
+        run: |
+          CFG="arch/arm64/configs/$KERNEL_CONFIG"
+          scripts/config --file "$CFG" --enable CONFIG_KSU
+          scripts/config --file "$CFG" --enable CONFIG_KSU_XXKSU
+          scripts/config --file "$CFG" --disable CONFIG_KSU_WITH_KPROBES
+          grep -n "CONFIG_KSU" "$CFG"
+
+          echo "--- cek hook manual di source"
+          miss=0
+          chk() {  # file pola
+            if [ -f "$1" ] && grep -q "$2" "$1"; then echo "ok    $1 ($2)"
+            else echo "::warning::hook TIDAK ada: $1 ($2)"; miss=1; fi
+          }
+          chk fs/exec.c     "ksu_handle_execveat"
+          chk fs/exec.c     "ksu_handle_execve_sucompat\|ksu_handle_execveat_sucompat"
+          chk fs/open.c     "ksu_handle_faccessat"
+          chk fs/stat.c     "ksu_handle_stat"
+          chk fs/read_write.c "ksu_handle_sys_read\|ksu_handle_vfs_read"
+          chk drivers/input/input.c "ksu_handle_input_handle_event"
+          grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada (4.4: pakai pts_inode di drivers/tty/pty.c)"; miss=1; }
+          [ "$miss" = 1 ] && echo "::warning::Ada hook manual yang belum dipasang, KernelSU bisa gagal grant root"
+          ls -d drivers/kernelsu drivers/xxksu KernelSU 2>/dev/null || echo "::warning::folder driver KSU tidak ketemu, pastikan sudah ada di source"
+
       # Racikan anti kedip LCD (panel KW/gantian di SDM660):
       # ESD/status check off, LPM off, KCAL on, idle power collapse off.
       - name: 🖥️ Patch anti kedip LCD
@@ -252,8 +297,15 @@ jobs:
           export SUBARCH=arm64
 
           # ThinLTO + lld baru menolak opsi import-instr-limit yang dobel; pakai pembungkus yang membuang duplikatnya
-          LD_BIN=ld.lld
-          if [ "$LTO_MODE" = "thin" ]; then
+          # Tanpa LTO pakai GNU ld dari GCC 4.9: lld baru gagal untuk built-in.o kosong
+          # ("ld.lld: error: target emulation unknown: -m or at least one .o file required")
+          if [ "$LTO_MODE" != "full" ] && [ "$LTO_MODE" != "thin" ] && command -v aarch64-linux-android-ld >/dev/null; then
+            LD_BIN=aarch64-linux-android-ld
+          else
+            LD_BIN=ld.lld
+          fi
+          echo "LD yang dipakai: $LD_BIN"
+          if [ "$LTO_MODE" = "thin" ] || [ "$LTO_MODE" = "full" ]; then
             cat > /tmp/ld-dedup.sh << 'LD_EOF'
           #!/bin/bash
           seen=0
@@ -272,11 +324,20 @@ jobs:
             args+=("$1")
             shift
           done
+          # lld menolak "ld -r" tanpa input kalau tidak ada emulation (-m)
+          hasm=0
+          for a in "${args[@]}"; do
+            case "$a" in -m|-maarch64*|-marm*|-melf*) hasm=1 ;; esac
+          done
+          [ $hasm -eq 0 ] && args=(-m aarch64linux "${args[@]}")
           exec ld.lld "${args[@]}"
           LD_EOF
             chmod +x /tmp/ld-dedup.sh
             LD_BIN=/tmp/ld-dedup.sh
           fi
+
+          # Clang baru + -Werror di qcacld-3.0: cast void* ke enum jadi error
+          export KCFLAGS="-Wno-void-pointer-to-enum-cast"
 
           ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=${LD_BIN} AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
@@ -314,7 +375,34 @@ jobs:
             scripts/config --file out/.config --disable CONFIG_FB_MSM_MDSS_LPM_ENABLE
             scripts/config --file out/.config --enable  CONFIG_FB_MSM_MDSS_KCAL_CTRL
           fi
+          if [ "$XXKSU" = "true" ]; then
+            scripts/config --file out/.config --enable CONFIG_KSU
+            scripts/config --file out/.config --enable CONFIG_KSU_XXKSU
+            scripts/config --file out/.config --disable CONFIG_KSU_WITH_KPROBES
+          fi
           make $ARGS olddefconfig 2>&1 | tee -a build.log
+
+          if [ "$XXKSU" = "true" ]; then
+            echo "--- CONFIG_KSU* di out/.config"
+            grep -n "CONFIG_KSU" out/.config || true
+            for sym in KSU KSU_XXKSU; do
+              grep -q "^CONFIG_${sym}=y" out/.config || {
+                echo "::error::CONFIG_${sym} tidak aktif (driver KSU tidak ada di source / dependensi Kconfig belum terpenuhi)"
+                exit 1
+              }
+            done
+            grep -q "^CONFIG_KSU_WITH_KPROBES=y" out/.config && echo "::warning::KPROBES masih aktif, bukan mode syscall"
+          fi
+
+          echo "--- Cek LTO di out/.config"
+          grep -n "CONFIG_LTO\|CONFIG_THINLTO" out/.config || true
+          if [ "$LTO_MODE" = "full" ] || [ "$LTO_MODE" = "thin" ]; then
+            if grep -q "^CONFIG_LTO_CLANG=y" out/.config; then
+              echo "LTO_CLANG aktif (mode $LTO_MODE)"
+            else
+              echo "::warning::LTO_CLANG TIDAK aktif: source tidak mendukung LTO, build jalan tanpa LTO"
+            fi
+          fi
 
           echo "--- Cek LCD config di out/.config"
           grep -n -E "MDSS_DSI_CTRL_STATUS|MDSS_LPM|MDSS_KCAL" out/.config || true
@@ -434,4 +522,3 @@ jobs:
             -F document=@"build-log.gz" \
             -F caption="Log lengkap (gzip)"
           echo
-
