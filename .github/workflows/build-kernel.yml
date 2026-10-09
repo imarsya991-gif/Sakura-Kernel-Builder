@@ -1,4 +1,4 @@
-name: Manual Build Kernel - NM PROJECT (lavender 4.4)
+honame: Manual Build Kernel - NM PROJECT (lavender 4.4)
 
 on:
   workflow_dispatch:
@@ -230,13 +230,26 @@ jobs:
             echo "::warning::$MDP tidak ditemukan, lewati"
           fi
 
+      - name: 🩹 Fix build 4.4 (dtc yylloc, gcc modern)
+        working-directory: kernel
+        run: |
+          # GCC 10+ default -fno-common -> "multiple definition of yylloc" di scripts/dtc
+          for f in scripts/dtc/dtc-lexer.lex.c_shipped scripts/dtc/dtc-lexer.l scripts/dtc/dtc-parser.tab.c_shipped; do
+            [ -f "$f" ] || continue
+            grep -n "yylloc" "$f" | head -n 5 || true
+            sed -i -E 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f"
+          done
+          echo "--- sesudah"
+          grep -n "YYLTYPE yylloc" scripts/dtc/*.c_shipped scripts/dtc/*.l 2>/dev/null || true
+          # hapus file hasil generate lama kalau ada
+          rm -f scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.tab.c scripts/dtc/dtc-parser.tab.h 2>/dev/null || true
+
       - name: 🔨 Build Kernel
         working-directory: kernel
         run: |
           set -o pipefail
           export ARCH=arm64
           export SUBARCH=arm64
-          [ -n "$EXTRAVERSION" ] && export LOCALVERSION="-${EXTRAVERSION}"
 
           # ThinLTO + lld baru menolak opsi import-instr-limit yang dobel; pakai pembungkus yang membuang duplikatnya
           LD_BIN=ld.lld
@@ -268,6 +281,13 @@ jobs:
           ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=${LD_BIN} AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
           make $ARGS "$KERNEL_CONFIG" $CONFIG_FRAGMENTS 2>&1 | tee build.log
+
+          # Kernel release max 64 karakter: pakai LOCALVERSION pendek (ASCII), matikan -g<hash>-dirty
+          LV=$(printf '%s' "${EXTRAVERSION:-$CODENAME}" | tr -cd 'A-Za-z0-9._-')
+          [ -z "$LV" ] && LV="$CODENAME"
+          scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-${LV}"
+          scripts/config --file out/.config --disable CONFIG_LOCALVERSION_AUTO
+          echo "LOCALVERSION: -${LV}"
 
           echo "Mode LTO: $LTO_MODE"
           if grep -q "LTO_CLANG" init/Kconfig arch/arm64/Kconfig 2>/dev/null; then
@@ -414,3 +434,4 @@ jobs:
             -F document=@"build-log.gz" \
             -F caption="Log lengkap (gzip)"
           echo
+
