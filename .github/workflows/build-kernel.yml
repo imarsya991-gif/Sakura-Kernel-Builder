@@ -502,13 +502,21 @@ jobs:
           # ThinLTO + lld baru menolak opsi import-instr-limit yang dobel; pakai pembungkus yang membuang duplikatnya
           # Tanpa LTO pakai GNU ld dari GCC 4.9: lld baru gagal untuk built-in.o kosong
           # ("ld.lld: error: target emulation unknown: -m or at least one .o file required")
-          if [ "$LTO_MODE" != "full" ] && [ "$LTO_MODE" != "thin" ] && command -v aarch64-linux-android-ld >/dev/null; then
+          # lld hanya dipakai kalau LTO diminta DAN source mendukung LTO_CLANG.
+          # Source tanpa LTO + lld gagal link vmlinux ("can't create dynamic relocation R_AARCH64_ABS64 ... -z notext").
+          LTO_SUPPORTED=0
+          grep -q "LTO_CLANG" init/Kconfig arch/arm64/Kconfig 2>/dev/null && LTO_SUPPORTED=1
+          USE_LLD=0
+          if { [ "$LTO_MODE" = "full" ] || [ "$LTO_MODE" = "thin" ]; } && [ "$LTO_SUPPORTED" = 1 ]; then
+            USE_LLD=1
+          fi
+          if [ "$USE_LLD" = 0 ] && command -v aarch64-linux-android-ld >/dev/null; then
             LD_BIN=aarch64-linux-android-ld
           else
             LD_BIN=ld.lld
           fi
-          echo "LD yang dipakai: $LD_BIN"
-          if [ "$LTO_MODE" = "thin" ] || [ "$LTO_MODE" = "full" ]; then
+          echo "LTO_MODE=$LTO_MODE, source support LTO_CLANG=$LTO_SUPPORTED, LD yang dipakai: $LD_BIN"
+          if [ "$LD_BIN" = "ld.lld" ]; then
             cat > /tmp/ld-dedup.sh << 'LD_EOF'
           #!/bin/bash
           seen=0
@@ -533,6 +541,8 @@ jobs:
             case "$a" in -m|-maarch64*|-marm*|-melf*) hasm=1 ;; esac
           done
           [ $hasm -eq 0 ] && args=(-m aarch64linux "${args[@]}")
+          # kernel PIE/KASLR: izinkan text relocation supaya lld tidak menolak link vmlinux
+          args+=(-z notext)
           exec ld.lld "${args[@]}"
           LD_EOF
             chmod +x /tmp/ld-dedup.sh
