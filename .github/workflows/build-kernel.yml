@@ -734,8 +734,11 @@ jobs:
           sed -i -E 's#^(IS_SLOT_DEVICE|is_slot_device)=.*#\1=0;#' "$AKS"
           sed -i "s|^kernel.string=.*|kernel.string=${BASE_NAME}|" "$AKS"
           for n in 2 3 4 5; do sed -i "s|^device.name${n}=.*|device.name${n}=|" "$AKS"; done
+          # boot lavender (system-as-root) tidak punya ramdisk: lewati unpack/repack ramdisk
+          # ("No ramdisk found to unpack. Aborting...")
+          sed -i -E 's#^dump_boot;#split_boot;#; s#^write_boot;#flash_boot;#' "$AKS"
           echo "--- anykernel.sh (properti & partisi)"
-          grep -n -E "^(kernel.string|do\.|device\.name|BLOCK|block|IS_SLOT_DEVICE|is_slot_device|RAMDISK_COMPRESSION|ramdisk_compression)" "$AKS" || true
+          grep -n -E "^(kernel.string|do\.|device\.name|BLOCK|block|IS_SLOT_DEVICE|is_slot_device|RAMDISK_COMPRESSION|ramdisk_compression|dump_boot|split_boot|write_boot|flash_boot)" "$AKS" || true
           cd AnyKernel3
           zip -r9 "../${BASE_NAME}.zip" . -x ".git*" -x "*.zip"
           cd ..
