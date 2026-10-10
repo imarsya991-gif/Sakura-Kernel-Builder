@@ -728,6 +728,14 @@ jobs:
           rm -rf AnyKernel3/.git AnyKernel3/*.zip
           cp "$IMG_PATH" AnyKernel3/
           sed -i "s/device.name1=.*/device.name1=${CODENAME}/" AnyKernel3/anykernel.sh || true
+          AKS=AnyKernel3/anykernel.sh
+          # Default AnyKernel3 memakai partisi boot contoh (omap_hsmmc) -> "Unable to determine ... boot partition"
+          sed -i -E 's#^(BLOCK|block)=.*#\1=/dev/block/bootdevice/by-name/boot;#' "$AKS"
+          sed -i -E 's#^(IS_SLOT_DEVICE|is_slot_device)=.*#\1=0;#' "$AKS"
+          sed -i "s|^kernel.string=.*|kernel.string=${BASE_NAME}|" "$AKS"
+          for n in 2 3 4 5; do sed -i "s|^device.name${n}=.*|device.name${n}=|" "$AKS"; done
+          echo "--- anykernel.sh (properti & partisi)"
+          grep -n -E "^(kernel.string|do\.|device\.name|BLOCK|block|IS_SLOT_DEVICE|is_slot_device|RAMDISK_COMPRESSION|ramdisk_compression)" "$AKS" || true
           cd AnyKernel3
           zip -r9 "../${BASE_NAME}.zip" . -x ".git*" -x "*.zip"
           cd ..
