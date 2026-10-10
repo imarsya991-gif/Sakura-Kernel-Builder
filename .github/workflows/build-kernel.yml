@@ -21,10 +21,18 @@ on:
         type: string
         default: ""
       XXKSU:
-        description: "Aktifkan xxksu (hook syscall manual, tanpa kprobes) lewat defconfig"
+        description: "Aktifkan xxksu lewat defconfig"
         required: true
         type: boolean
         default: true
+      KSU_HOOK_MODE:
+        description: "Mode hook xxksu: syscall = tamper syscall table (tanpa patch source); manual = patch hook di source"
+        required: true
+        type: choice
+        options:
+          - syscall
+          - manual
+        default: syscall
       ANTI_FLICKER:
         description: "Patch anti kedip LCD (ESD check off, LPM off, KCAL on, idle_pc off)"
         required: true
@@ -63,6 +71,7 @@ jobs:
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
       CONFIG_FRAGMENTS: ${{ github.event.inputs.CONFIG_FRAGMENTS }}
       XXKSU: ${{ github.event.inputs.XXKSU }}
+      KSU_HOOK_MODE: ${{ github.event.inputs.KSU_HOOK_MODE }}
       ANTI_FLICKER: ${{ github.event.inputs.ANTI_FLICKER }}
       LTO_MODE: ${{ github.event.inputs.LTO_MODE }}
       CODENAME: ${{ github.event.inputs.CODENAME }}
@@ -206,8 +215,8 @@ jobs:
 
       # Pasang hook syscall manual KSU otomatis (scope-minimized, dari backslashxx/KernelSU issue #5).
       # Tiap hook hanya dipasang kalau handler-nya ada di driver KSU dan pola kodenya cocok.
-      - name: 🪝 Pasang hook manual KSU otomatis
-        if: ${{ github.event.inputs.XXKSU == 'true' }}
+      - name: 🪝 Pasang hook manual KSU otomatis (hanya mode manual)
+        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_HOOK_MODE == 'manual' }}
         working-directory: kernel
         run: |
           cat > /tmp/ksu_hooks.py << 'PYEOF'
@@ -228,8 +237,13 @@ jobs:
                       ksu_src += read(os.path.join(root, fn)) + "\n"
 
           def have(sym):
-              # kalau sumber KSU tidak terbaca, anggap ada
-              return (not ksu_src) or (sym in ksu_src)
+              """True kalau simbol benar-benar DIDEFINISIKAN di driver KSU (bukan sekadar disebut/extern/dipanggil)."""
+              if not ksu_src:
+                  return True
+              n = re.escape(sym)
+              var = re.search(r'^(?!\s*extern\b)[ \t\w\*]*\b(?:bool|int)\b[ \t\w\*]*\b' + n + r'\b[ \t\w]*(?:=|;)', ksu_src, re.M)
+              fn = re.search(r'^(?!\s*(?:static|extern|if|while|return)\b)[ \t\w\*]*\b' + n + r'\s*\([^;{]*\)\s*\{', ksu_src, re.M)
+              return bool(var or fn)
 
           applied, skipped = [], []
 
@@ -264,7 +278,7 @@ jobs:
                   skipped.append(f"{label}: {path} tidak ada"); return
               for s in need:
                   if not have(s):
-                      skipped.append(f"{label}: KSU tidak punya '{s}'"); return
+                      skipped.append(f"{label}: driver KSU tidak mendefinisikan '{s}' (hook dilewati)"); return
               t = read(path)
               if marker in t:
                   skipped.append(f"{label}: sudah terpasang"); return
@@ -282,14 +296,20 @@ jobs:
                      "#endif\n\n")
               t2 = before_header(t, r'^static void input_handle_event\(', ext)
               if t2 is None: return None
-              call = ("#ifdef CONFIG_KSU\n"
-                      "\tif (unlikely(ksu_input_hook))\n"
-                      "\t\tksu_handle_input_handle_event(&type, &code, &value);\n"
-                      "#endif\n")
+              if have('ksu_input_hook'):
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tif (unlikely(ksu_input_hook))\n"
+                          "\t\tksu_handle_input_handle_event(&type, &code, &value);\n"
+                          "#endif\n")
+              else:
+                  t2 = t2.replace("extern bool ksu_input_hook __read_mostly;\n", "")
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tksu_handle_input_handle_event(&type, &code, &value);\n"
+                          "#endif\n")
               m = re.search(r'^static void input_handle_event\(.*?\{\s*\n\s*int disposition = input_get_disposition\(dev, type, code, &value\);\n', t2, re.M | re.S)
               if not m: return None
               return t2[:m.end()] + call + t2[m.end():]
-          patch('drivers/input/input.c', 'input (safemode)', ['ksu_handle_input_handle_event', 'ksu_input_hook'], 'ksu_handle_input_handle_event', f_input)
+          patch('drivers/input/input.c', 'input (safemode)', ['ksu_handle_input_handle_event'], 'ksu_handle_input_handle_event', f_input)
 
           # ---- devpts ----
           def f_devpts(t):
@@ -314,12 +334,18 @@ jobs:
               hdr = r'^static int do_execveat_common\([^{;]*?\)\s*\{'
               t2 = before_header(t, hdr, ext)
               if t2 is None: return None
-              call = ("#ifdef CONFIG_KSU\n"
-                      "\tif (unlikely(ksu_execveat_hook))\n"
-                      "\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-                      "#endif\n\n")
+              if have('ksu_execveat_hook'):
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tif (unlikely(ksu_execveat_hook))\n"
+                          "\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+                          "#endif\n\n")
+              else:
+                  t2 = t2.replace("extern bool ksu_execveat_hook __read_mostly;\n", "", 1)
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+                          "#endif\n\n")
               return before_target(t2, hdr, r'^\s*if \(IS_ERR\(filename\)\)', call)
-          patch('fs/exec.c', 'execveat', ['ksu_handle_execveat', 'ksu_execveat_hook'], 'ksu_handle_execveat', f_execveat)
+          patch('fs/exec.c', 'execveat', ['ksu_handle_execveat'], 'ksu_handle_execveat', f_execveat)
 
           # ---- exec.c: sucompat (execve + compat) ----
           def f_sucompat(t):
@@ -330,10 +356,16 @@ jobs:
                      "\t\t\t       int *__never_use_flags);\n"
                      "int at_fdcwd = AT_FDCWD;\n"
                      "#endif\n\n")
-              call = ("#ifdef CONFIG_KSU\n"
-                      "\tif (!ksu_execveat_hook)\n"
-                      "\t\tksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL);\n"
-                      "#endif\n")
+              if have('ksu_execveat_hook'):
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tif (!ksu_execveat_hook)\n"
+                          "\t\tksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL);\n"
+                          "#endif\n")
+              else:
+                  ext = ext.replace("extern bool ksu_execveat_hook __read_mostly;\n", "")
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL);\n"
+                          "#endif\n")
               h1 = r'^SYSCALL_DEFINE3\(execve,[^{;]*\{'
               t = before_header(t, h1, ext)
               if t is None: return None
@@ -368,12 +400,18 @@ jobs:
               hdr = r'^SYSCALL_DEFINE3\(read,[^{;]*\{'
               t2 = before_header(t, hdr, ext)
               if t2 is None: return None
-              call = ("#ifdef CONFIG_KSU\n"
-                      "\t\tif (unlikely(ksu_vfs_read_hook))\n"
-                      "\t\t\tksu_handle_sys_read(fd, &buf, &count);\n"
-                      "#endif\n")
+              if have('ksu_vfs_read_hook'):
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\t\tif (unlikely(ksu_vfs_read_hook))\n"
+                          "\t\t\tksu_handle_sys_read(fd, &buf, &count);\n"
+                          "#endif\n")
+              else:
+                  t2 = t2.replace("extern bool ksu_vfs_read_hook __read_mostly;\n", "", 1)
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
+                          "#endif\n")
               return before_target(t2, hdr, r'^\s*ret = vfs_read\(f\.file, buf, count, &pos\);', call)
-          patch('fs/read_write.c', 'sys_read', ['ksu_handle_sys_read', 'ksu_vfs_read_hook'], 'ksu_handle_sys_read', f_read)
+          patch('fs/read_write.c', 'sys_read', ['ksu_handle_sys_read'], 'ksu_handle_sys_read', f_read)
 
           # ---- stat.c ----
           def make_stat(name):
@@ -411,30 +449,44 @@ jobs:
 
       # xxksu cukup lewat defconfig (tanpa fragment). Mode syscall = manual hook, KPROBES mati.
       # Hook manual (execve, faccessat, stat, read, input, devpts) harus sudah ada di source.
-      - name: 🛡️ Aktifkan xxksu (syscall hook) via defconfig
+      - name: 🛡️ Aktifkan xxksu via defconfig
         if: ${{ github.event.inputs.XXKSU == 'true' }}
         working-directory: kernel
         run: |
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
           scripts/config --file "$CFG" --enable CONFIG_KSU
           scripts/config --file "$CFG" --disable CONFIG_KSU_WITH_KPROBES
-          grep -n "CONFIG_KSU" "$CFG"
 
-          echo "--- cek hook manual di source"
-          miss=0
-          chk() {  # file pola
-            if [ -f "$1" ] && grep -q "$2" "$1"; then echo "ok    $1 ($2)"
-            else echo "::warning::hook TIDAK ada: $1 ($2)"; miss=1; fi
-          }
-          chk fs/exec.c     "ksu_handle_execveat"
-          chk fs/exec.c     "ksu_handle_execve_sucompat\|ksu_handle_execveat_sucompat"
-          chk fs/open.c     "ksu_handle_faccessat"
-          chk fs/stat.c     "ksu_handle_stat"
-          chk fs/read_write.c "ksu_handle_sys_read\|ksu_handle_vfs_read"
-          chk drivers/input/input.c "ksu_handle_input_handle_event"
-          grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada (4.4: pakai pts_inode di drivers/tty/pty.c)"; miss=1; }
-          [ "$miss" = 1 ] && echo "::warning::Ada hook manual yang belum dipasang, KernelSU bisa gagal grant root"
+          if [ "$KSU_HOOK_MODE" = "syscall" ]; then
+            # Mode syscall: KSU menimpa syscall table sendiri, tanpa patch hook di source kernel
+            if ! grep -RqsE "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ ; then
+              echo "::error::Versi KSU ini tidak punya KSU_TAMPER_SYSCALL_TABLE (hasil setup.sh bukan versi yang support mode syscall)"
+              ls -la drivers/kernelsu/ KernelSU 2>/dev/null | head -n 20
+              exit 1
+            fi
+            scripts/config --file "$CFG" --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
+            echo "--- Kconfig KSU_TAMPER_SYSCALL_TABLE"
+            grep -RhnE -B1 -A14 "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ | head -n 40 || true
+          fi
+          grep -n "CONFIG_KSU" "$CFG"
           [ -d drivers/kernelsu ] && echo "ok    driver KSU: drivers/kernelsu" || echo "::warning::folder driver KSU tidak ketemu, pastikan sudah ada di source"
+
+          if [ "$KSU_HOOK_MODE" = "manual" ]; then
+            echo "--- cek hook manual di source"
+            miss=0
+            chk() {  # file pola
+              if [ -f "$1" ] && grep -q "$2" "$1"; then echo "ok    $1 ($2)"
+              else echo "::warning::hook TIDAK ada: $1 ($2)"; miss=1; fi
+            }
+            chk fs/exec.c     "ksu_handle_execveat"
+            chk fs/exec.c     "ksu_handle_execve_sucompat\\|ksu_handle_execveat_sucompat"
+            chk fs/open.c     "ksu_handle_faccessat"
+            chk fs/stat.c     "ksu_handle_stat"
+            chk fs/read_write.c "ksu_handle_sys_read\\|ksu_handle_vfs_read"
+            chk drivers/input/input.c "ksu_handle_input_handle_event"
+            grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada"; miss=1; }
+            [ "$miss" = 1 ] && echo "::warning::Ada hook yang belum terpasang (hook yang tidak didefinisikan driver KSU memang dilewati)"
+          fi
 
       # Racikan anti kedip LCD (panel KW/gantian di SDM660):
       # ESD/status check off, LPM off, KCAL on, idle power collapse off.
@@ -550,7 +602,8 @@ jobs:
           fi
 
           # Clang baru + -Werror di qcacld-3.0: cast void* ke enum jadi error
-          export KCFLAGS="-Wno-void-pointer-to-enum-cast"
+          # -fno-builtin-stpcpy: clang baru mengubah sprintf jadi stpcpy, kernel 4.4 tidak punya ("undefined reference to stpcpy")
+          export KCFLAGS="-Wno-void-pointer-to-enum-cast -fno-builtin-stpcpy"
 
           ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=${LD_BIN} AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
@@ -591,20 +644,26 @@ jobs:
           if [ "$XXKSU" = "true" ]; then
             scripts/config --file out/.config --enable CONFIG_KSU
             scripts/config --file out/.config --disable CONFIG_KSU_WITH_KPROBES
+            if [ "$KSU_HOOK_MODE" = "syscall" ]; then
+              scripts/config --file out/.config --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
+            fi
           fi
           make $ARGS olddefconfig 2>&1 | tee -a build.log
 
           if [ "$XXKSU" = "true" ]; then
             echo "--- CONFIG_KSU* di out/.config"
             grep -n "CONFIG_KSU" out/.config || true
-            for sym in KSU; do
+            KSU_SYMS="KSU"
+            if [ "$KSU_HOOK_MODE" = "syscall" ]; then KSU_SYMS="KSU KSU_TAMPER_SYSCALL_TABLE"; fi
+            for sym in $KSU_SYMS; do
               grep -q "^CONFIG_${sym}=y" out/.config || {
-                echo "::error::CONFIG_${sym} tidak aktif (driver KSU tidak ada di source / dependensi Kconfig belum terpenuhi)" | tee -a build.log
+                echo "::error::CONFIG_${sym} tidak aktif (dependensi Kconfig belum terpenuhi / simbol tidak ada)" | tee -a build.log
                 grep -n "CONFIG_KSU" out/.config | tee -a build.log || true
+                grep -RhnE -B1 -A14 "config ${sym}\$" drivers/kernelsu/ | head -n 40 | tee -a build.log || true
                 exit 1
               }
             done
-            grep -q "^CONFIG_KSU_WITH_KPROBES=y" out/.config && echo "::warning::KPROBES masih aktif, bukan mode syscall"
+            grep -q "^CONFIG_KSU_WITH_KPROBES=y" out/.config && echo "::warning::KPROBES masih aktif"
           fi
 
           echo "--- Cek LTO di out/.config"
