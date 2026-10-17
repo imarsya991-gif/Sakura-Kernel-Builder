@@ -578,8 +578,11 @@ jobs:
               chk drivers/input/input.c "ksu_handle_input_handle_event"
               grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada"; miss=1; }
             fi
-            [ "$miss" = 1 ] && echo "::warning::Ada hook yang belum terpasang (hook yang tidak didefinisikan driver KSU memang dilewati)"
+            if [ "$miss" = 1 ]; then
+              echo "::warning::Ada hook yang belum terpasang (hook yang tidak didefinisikan driver KSU memang dilewati)"
+            fi
           fi
+          exit 0
 
       # Racikan anti kedip LCD (panel KW/gantian di SDM660):
       # ESD/status check off, LPM off, KCAL on, idle power collapse off.
