@@ -21,12 +21,20 @@ on:
         type: string
         default: ""
       XXKSU:
-        description: "Aktifkan xxksu lewat defconfig"
+        description: "Aktifkan KernelSU (varian dipilih di KSU_VARIANT) lewat defconfig"
         required: true
         type: boolean
         default: true
+      KSU_VARIANT:
+        description: "Varian KSU: sukisu = SukiSU-Ultra branch builtin (Magic Mount bawaan manager, hook manual otomatis); xxksu = backslashxx"
+        required: true
+        type: choice
+        options:
+          - sukisu
+          - xxksu
+        default: sukisu
       KSU_HOOK_MODE:
-        description: "Mode hook xxksu: syscall = tamper syscall table (tanpa patch source); manual = patch hook di source"
+        description: "Khusus xxksu: syscall = tamper syscall table (tanpa patch source); manual = patch hook di source. Sukisu selalu manual."
         required: true
         type: choice
         options:
@@ -71,6 +79,7 @@ jobs:
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
       CONFIG_FRAGMENTS: ${{ github.event.inputs.CONFIG_FRAGMENTS }}
       XXKSU: ${{ github.event.inputs.XXKSU }}
+      KSU_VARIANT: ${{ github.event.inputs.KSU_VARIANT }}
       KSU_HOOK_MODE: ${{ github.event.inputs.KSU_HOOK_MODE }}
       ANTI_FLICKER: ${{ github.event.inputs.ANTI_FLICKER }}
       LTO_MODE: ${{ github.event.inputs.LTO_MODE }}
@@ -97,6 +106,7 @@ jobs:
             "Source : ${KERNEL_SOURCE}" \
             "Branch : ${KERNEL_BRANCH}" \
             "Config : ${KERNEL_CONFIG} ${CONFIG_FRAGMENTS}" \
+            "KSU    : ${XXKSU} (${KSU_VARIANT})" \
             "LTO    : ${LTO_MODE}" \
             "AntiKedip : ${ANTI_FLICKER}" \
             "Run    : ${RUN_URL}")
@@ -205,7 +215,7 @@ jobs:
 
       # Integrasi xxksu ke source via setup.sh (credit: @linx3141)
       - name: 📥 Integrasi xxksu (curl setup.sh)
-        if: ${{ github.event.inputs.XXKSU == 'true' }}
+        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'xxksu' }}
         working-directory: kernel
         run: |
           curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
@@ -213,14 +223,33 @@ jobs:
           ls -la drivers/ | grep -i -E "kernelsu|xxksu" || true
           grep -n -i "kernelsu" drivers/Makefile drivers/Kconfig || true
 
+      # Integrasi SukiSU-Ultra branch builtin (non-GKI, tanpa kprobes, hook dipasang manual di source).
+      # Magic Mount ada di ksud milik manager SukiSU, jadi tidak butuh metamodule.
+      - name: 📥 Integrasi SukiSU-Ultra (builtin)
+        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'sukisu' }}
+        working-directory: kernel
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          echo "--- hasil integrasi"
+          ls -la drivers/ | grep -i -E "kernelsu" || true
+          grep -n -i "kernelsu" drivers/Makefile drivers/Kconfig || true
+          for f in drivers/kernelsu/Kconfig drivers/kernelsu/runtime/ksud.c drivers/kernelsu/feature/sucompat.c; do
+            if [ -f "$f" ]; then echo "ok    $f"; else echo "::error::$f tidak ada (setup.sh builtin gagal / struktur repo berubah)"; exit 1; fi
+          done
+          echo "--- Kconfig SukiSU (builtin)"
+          grep -n -E "^config |depends on" drivers/kernelsu/Kconfig | head -n 40 || true
+
       # Pasang hook syscall manual KSU otomatis (scope-minimized, dari backslashxx/KernelSU issue #5).
       # Tiap hook hanya dipasang kalau handler-nya ada di driver KSU dan pola kodenya cocok.
-      - name: 🪝 Pasang hook manual KSU otomatis (hanya mode manual)
-        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_HOOK_MODE == 'manual' }}
+      # xxksu: hanya mode manual. sukisu (builtin): selalu jalan. Handler beda nama ditangani via KSU_VARIANT.
+      - name: 🪝 Pasang hook manual KSU otomatis
+        if: ${{ github.event.inputs.XXKSU == 'true' && (github.event.inputs.KSU_VARIANT == 'sukisu' || github.event.inputs.KSU_HOOK_MODE == 'manual') }}
         working-directory: kernel
         run: |
           cat > /tmp/ksu_hooks.py << 'PYEOF'
           import os, re, sys
+
+          SUKI = os.environ.get('KSU_VARIANT') == 'sukisu'
 
           def read(p):
               with open(p, encoding='utf-8', errors='surrogateescape') as f:
@@ -288,7 +317,7 @@ jobs:
               write(path, r)
               applied.append(f"{label} ({path})")
 
-          # ---- input: safemode ----
+          # ---- input: safemode (xxksu saja; SukiSU pakai input handler sendiri, hook ini dead code) ----
           def f_input(t):
               ext = ("#ifdef CONFIG_KSU\n"
                      "extern bool ksu_input_hook __read_mostly;\n"
@@ -309,9 +338,10 @@ jobs:
               m = re.search(r'^static void input_handle_event\(.*?\{\s*\n\s*int disposition = input_get_disposition\(dev, type, code, &value\);\n', t2, re.M | re.S)
               if not m: return None
               return t2[:m.end()] + call + t2[m.end():]
-          patch('drivers/input/input.c', 'input (safemode)', ['ksu_handle_input_handle_event'], 'ksu_handle_input_handle_event', f_input)
+          if not SUKI:
+              patch('drivers/input/input.c', 'input (safemode)', ['ksu_handle_input_handle_event'], 'ksu_handle_input_handle_event', f_input)
 
-          # ---- devpts ----
+          # ---- devpts (xxksu saja; SukiSU builtin tidak punya handler ini) ----
           def f_devpts(t):
               hm = re.search(r'^void \*devpts_get_priv\(\s*struct (dentry|inode)\s*\*\s*(\w+)\s*\)\s*\{', t, re.M)
               if not hm: return None
@@ -322,16 +352,39 @@ jobs:
               hm = re.search(r'^void \*devpts_get_priv\(\s*struct (dentry|inode)\s*\*\s*(\w+)\s*\)\s*\{', t, re.M)
               call = f"#ifdef CONFIG_KSU\n\tksu_handle_devpts({arg});\n#endif\n"
               return t[:hm.end()] + "\n" + call + t[hm.end():]
-          patch('fs/devpts/inode.c', 'devpts', ['ksu_handle_devpts'], 'ksu_handle_devpts', f_devpts)
+          if not SUKI:
+              patch('fs/devpts/inode.c', 'devpts', ['ksu_handle_devpts'], 'ksu_handle_devpts', f_devpts)
 
           # ---- exec.c: execveat ----
+          # xxksu : ksu_handle_execveat
+          # sukisu: ksu_handle_execveat_ksud (saat ksu_execveat_hook aktif) / ksu_handle_execveat_sucompat (sesudahnya)
           def f_execveat(t):
+              hdr = r'^static int do_execveat_common\([^{;]*?\)\s*\{'
+              if SUKI:
+                  with_su = have('ksu_handle_execveat_sucompat')
+                  ext = ("#ifdef CONFIG_KSU\n"
+                         "extern bool ksu_execveat_hook __read_mostly;\n"
+                         "extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, void *argv,\n"
+                         "\t\t\tvoid *envp, int *flags);\n")
+                  if with_su:
+                      ext += ("extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,\n"
+                              "\t\t\tvoid *envp, int *flags);\n")
+                  ext += "#endif\n\n"
+                  call = ("#ifdef CONFIG_KSU\n"
+                          "\tif (unlikely(ksu_execveat_hook))\n"
+                          "\t\tksu_handle_execveat_ksud(&fd, &filename, &argv, &envp, &flags);\n")
+                  if with_su:
+                      call += ("\telse\n"
+                               "\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n")
+                  call += "#endif\n\n"
+                  t2 = before_header(t, hdr, ext)
+                  if t2 is None: return None
+                  return before_target(t2, hdr, r'^\s*if \(IS_ERR\(filename\)\)', call)
               ext = ("#ifdef CONFIG_KSU\n"
                      "extern bool ksu_execveat_hook __read_mostly;\n"
                      "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n"
                      "\t\t\tvoid *envp, int *flags);\n"
                      "#endif\n\n")
-              hdr = r'^static int do_execveat_common\([^{;]*?\)\s*\{'
               t2 = before_header(t, hdr, ext)
               if t2 is None: return None
               if have('ksu_execveat_hook'):
@@ -345,7 +398,7 @@ jobs:
                           "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
                           "#endif\n\n")
               return before_target(t2, hdr, r'^\s*if \(IS_ERR\(filename\)\)', call)
-          patch('fs/exec.c', 'execveat', ['ksu_handle_execveat'], 'ksu_handle_execveat', f_execveat)
+          patch('fs/exec.c', 'execveat', ['ksu_handle_execveat_ksud' if SUKI else 'ksu_handle_execveat'], 'ksu_handle_execveat', f_execveat)
 
           # ---- exec.c: sucompat (execve + compat) ----
           def f_sucompat(t):
@@ -434,6 +487,26 @@ jobs:
               return r2 if r2 is not None else r
           patch('fs/stat.c', 'stat', ['ksu_handle_stat'], 'ksu_handle_stat', stat_all)
 
+          # ---- stat.c: vfs_fstat (SukiSU saja, opsional: ukuran init.rc ikut ditambah rc KSU) ----
+          def f_fstat(t):
+              hdr = r'^int vfs_fstat\([^{;]*\)\s*\{'
+              ext = ("#ifdef CONFIG_KSU\n"
+                     "extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\n"
+                     "#endif\n\n")
+              t2 = before_header(t, hdr, ext)
+              if t2 is None: return None
+              m = re.search(hdr, t2, re.M | re.S)
+              n = re.search(r'^[ \t]*error = vfs_getattr\(&f\.file->f_path, stat[^;]*\);\n', t2[m.end():], re.M)
+              if not n: return None
+              pos = m.end() + n.end()
+              call = ("#ifdef CONFIG_KSU\n"
+                      "\t\tif (!error)\n"
+                      "\t\t\tksu_handle_vfs_fstat(fd, &stat->size);\n"
+                      "#endif\n")
+              return t2[:pos] + call + t2[pos:]
+          if SUKI:
+              patch('fs/stat.c', 'vfs_fstat', ['ksu_handle_vfs_fstat'], 'ksu_handle_vfs_fstat', f_fstat)
+
           print("=== Hook terpasang ===")
           for a in applied: print("OK    ", a)
           print("=== Dilewati ===")
@@ -442,49 +515,69 @@ jobs:
           python3 /tmp/ksu_hooks.py
           echo "--- ringkasan perubahan"
           git diff --stat || true
-          echo "--- handler KSU lain yang butuh hook (setuid / prctl / LSM)"
-          grep -RIn -E "ksu_handle_setuid|ksu_handle_setresuid|ksu_handle_prctl|ksu_handle_rename|ksu_bprm_check|ksu_inode_permission" drivers/kernelsu/ 2>/dev/null | head -n 30 || true
-          echo "--- Kconfig KSU (mode hook)"
-          grep -n -A8 -E "config KSU_LSM_SECURITY_HOOKS|config KSU_WITH_KPROBES|config KSU_MANUAL" drivers/kernelsu/Kconfig 2>/dev/null | head -n 60 || true
+          if [ "$KSU_VARIANT" = "sukisu" ]; then
+            echo "--- SukiSU builtin: setuid/umount lewat LSM task_fix_setuid (butuh CONFIG_SECURITY), tanpa hook source tambahan"
+            grep -n -E "LSM_HOOK_INIT|security_add_hooks" drivers/kernelsu/hook/lsm_hook.c 2>/dev/null | head -n 10 || true
+          else
+            echo "--- handler KSU lain yang butuh hook (setuid / prctl / LSM)"
+            grep -RIn -E "ksu_handle_setuid|ksu_handle_setresuid|ksu_handle_prctl|ksu_handle_rename|ksu_bprm_check|ksu_inode_permission" drivers/kernelsu/ 2>/dev/null | head -n 30 || true
+            echo "--- Kconfig KSU (mode hook)"
+            grep -n -A8 -E "config KSU_LSM_SECURITY_HOOKS|config KSU_WITH_KPROBES|config KSU_MANUAL" drivers/kernelsu/Kconfig 2>/dev/null | head -n 60 || true
+          fi
 
-      # xxksu cukup lewat defconfig (tanpa fragment). Mode syscall = manual hook, KPROBES mati.
-      # Hook manual (execve, faccessat, stat, read, input, devpts) harus sudah ada di source.
-      - name: 🛡️ Aktifkan xxksu via defconfig
+      # KSU cukup lewat defconfig (tanpa fragment).
+      # xxksu: mode syscall = manual hook, KPROBES mati. sukisu (builtin): tanpa KPROBES, tanpa SUSFS/KPM.
+      # Hook manual (execve, faccessat, stat, read, ...) harus sudah ada di source (sukisu/manual: dipasang step sebelumnya).
+      - name: 🛡️ Aktifkan KSU via defconfig
         if: ${{ github.event.inputs.XXKSU == 'true' }}
         working-directory: kernel
         run: |
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
           scripts/config --file "$CFG" --enable CONFIG_KSU
-          scripts/config --file "$CFG" --disable CONFIG_KSU_WITH_KPROBES
 
-          if [ "$KSU_HOOK_MODE" = "syscall" ]; then
-            # Mode syscall: KSU menimpa syscall table sendiri, tanpa patch hook di source kernel
-            if ! grep -RqsE "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ ; then
-              echo "::error::Versi KSU ini tidak punya KSU_TAMPER_SYSCALL_TABLE (hasil setup.sh bukan versi yang support mode syscall)"
-              ls -la drivers/kernelsu/ KernelSU 2>/dev/null | head -n 20
-              exit 1
+          if [ "$KSU_VARIANT" = "sukisu" ]; then
+            # SUSFS butuh patch kernel terpisah + THREAD_INFO_IN_TASK (tidak ada di 4.4), KPM butuh set_memory.h 4.19
+            scripts/config --file "$CFG" --disable CONFIG_KSU_SUSFS
+            scripts/config --file "$CFG" --disable CONFIG_KPM
+          else
+            scripts/config --file "$CFG" --disable CONFIG_KSU_WITH_KPROBES
+            if [ "$KSU_HOOK_MODE" = "syscall" ]; then
+              # Mode syscall: KSU menimpa syscall table sendiri, tanpa patch hook di source kernel
+              if ! grep -RqsE "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ ; then
+                echo "::error::Versi KSU ini tidak punya KSU_TAMPER_SYSCALL_TABLE (hasil setup.sh bukan versi yang support mode syscall)"
+                ls -la drivers/kernelsu/ KernelSU 2>/dev/null | head -n 20
+                exit 1
+              fi
+              scripts/config --file "$CFG" --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
+              echo "--- Kconfig KSU_TAMPER_SYSCALL_TABLE"
+              grep -RhnE -B1 -A14 "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ | head -n 40 || true
             fi
-            scripts/config --file "$CFG" --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
-            echo "--- Kconfig KSU_TAMPER_SYSCALL_TABLE"
-            grep -RhnE -B1 -A14 "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ | head -n 40 || true
           fi
           grep -n "CONFIG_KSU" "$CFG"
           [ -d drivers/kernelsu ] && echo "ok    driver KSU: drivers/kernelsu" || echo "::warning::folder driver KSU tidak ketemu, pastikan sudah ada di source"
 
-          if [ "$KSU_HOOK_MODE" = "manual" ]; then
+          if [ "$KSU_VARIANT" = "sukisu" ] || [ "$KSU_HOOK_MODE" = "manual" ]; then
             echo "--- cek hook manual di source"
             miss=0
             chk() {  # file pola
               if [ -f "$1" ] && grep -q "$2" "$1"; then echo "ok    $1 ($2)"
               else echo "::warning::hook TIDAK ada: $1 ($2)"; miss=1; fi
             }
-            chk fs/exec.c     "ksu_handle_execveat"
-            chk fs/exec.c     "ksu_handle_execve_sucompat\\|ksu_handle_execveat_sucompat"
-            chk fs/open.c     "ksu_handle_faccessat"
-            chk fs/stat.c     "ksu_handle_stat"
-            chk fs/read_write.c "ksu_handle_sys_read\\|ksu_handle_vfs_read"
-            chk drivers/input/input.c "ksu_handle_input_handle_event"
-            grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada"; miss=1; }
+            if [ "$KSU_VARIANT" = "sukisu" ]; then
+              chk fs/exec.c     "ksu_handle_execveat_ksud"
+              chk fs/exec.c     "ksu_handle_execve_sucompat"
+              chk fs/open.c     "ksu_handle_faccessat"
+              chk fs/stat.c     "ksu_handle_stat"
+              chk fs/read_write.c "ksu_handle_sys_read\\|ksu_handle_vfs_read"
+            else
+              chk fs/exec.c     "ksu_handle_execveat"
+              chk fs/exec.c     "ksu_handle_execve_sucompat\\|ksu_handle_execveat_sucompat"
+              chk fs/open.c     "ksu_handle_faccessat"
+              chk fs/stat.c     "ksu_handle_stat"
+              chk fs/read_write.c "ksu_handle_sys_read\\|ksu_handle_vfs_read"
+              chk drivers/input/input.c "ksu_handle_input_handle_event"
+              grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada"; miss=1; }
+            fi
             [ "$miss" = 1 ] && echo "::warning::Ada hook yang belum terpasang (hook yang tidak didefinisikan driver KSU memang dilewati)"
           fi
 
@@ -643,9 +736,14 @@ jobs:
           fi
           if [ "$XXKSU" = "true" ]; then
             scripts/config --file out/.config --enable CONFIG_KSU
-            scripts/config --file out/.config --disable CONFIG_KSU_WITH_KPROBES
-            if [ "$KSU_HOOK_MODE" = "syscall" ]; then
-              scripts/config --file out/.config --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
+            if [ "$KSU_VARIANT" = "sukisu" ]; then
+              scripts/config --file out/.config --disable CONFIG_KSU_SUSFS
+              scripts/config --file out/.config --disable CONFIG_KPM
+            else
+              scripts/config --file out/.config --disable CONFIG_KSU_WITH_KPROBES
+              if [ "$KSU_HOOK_MODE" = "syscall" ]; then
+                scripts/config --file out/.config --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
+              fi
             fi
           fi
           make $ARGS olddefconfig 2>&1 | tee -a build.log
@@ -654,7 +752,7 @@ jobs:
             echo "--- CONFIG_KSU* di out/.config"
             grep -n "CONFIG_KSU" out/.config || true
             KSU_SYMS="KSU"
-            if [ "$KSU_HOOK_MODE" = "syscall" ]; then KSU_SYMS="KSU KSU_TAMPER_SYSCALL_TABLE"; fi
+            if [ "$KSU_VARIANT" != "sukisu" ] && [ "$KSU_HOOK_MODE" = "syscall" ]; then KSU_SYMS="KSU KSU_TAMPER_SYSCALL_TABLE"; fi
             for sym in $KSU_SYMS; do
               grep -q "^CONFIG_${sym}=y" out/.config || {
                 echo "::error::CONFIG_${sym} tidak aktif (dependensi Kconfig belum terpenuhi / simbol tidak ada)" | tee -a build.log
@@ -663,7 +761,15 @@ jobs:
                 exit 1
               }
             done
-            grep -q "^CONFIG_KSU_WITH_KPROBES=y" out/.config && echo "::warning::KPROBES masih aktif"
+            if [ "$KSU_VARIANT" = "sukisu" ]; then
+              # SukiSU builtin: setuid/umount lewat LSM, nuke_ext4_sysfs butuh ext4
+              for s in SECURITY SECURITY_SELINUX EXT4_FS; do
+                grep -q "^CONFIG_${s}=y" out/.config || echo "::warning::CONFIG_${s} tidak =y di out/.config (dibutuhkan SukiSU)"
+              done
+              grep -q "^CONFIG_KSU_SUSFS=y" out/.config && echo "::warning::KSU_SUSFS aktif padahal kernel belum dipatch SUSFS"
+            else
+              grep -q "^CONFIG_KSU_WITH_KPROBES=y" out/.config && echo "::warning::KPROBES masih aktif"
+            fi
           fi
 
           echo "--- Cek LTO di out/.config"
