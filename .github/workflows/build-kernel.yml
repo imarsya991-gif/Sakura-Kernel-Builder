@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: ""
+      KERNEL_VERSION:
+        description: "Opsi versi kernel (MAJOR.MINOR.SUBLEVEL, mis: 5.10.200). Menimpa VERSION/PATCHLEVEL/SUBLEVEL di Makefile supaya blok #if LINUX_VERSION_CODE di SukiSU ikut aktif. Kosongkan = versi asli source"
+        required: false
+        type: string
+        default: ""
       XXKSU:
         description: "Aktifkan KernelSU (varian dipilih di KSU_VARIANT) lewat defconfig"
         required: true
@@ -33,6 +38,14 @@ on:
           - sukisu
           - xxksu
         default: sukisu
+      SUKISU_SOURCE:
+        description: "Khusus sukisu: non-gki-port = xiziya/SukiSU_Non-GKI (builtin + compat kernel <5.10); official-builtin = SukiSU-Ultra resmi (hanya jalan di kernel 5.10+)"
+        required: true
+        type: choice
+        options:
+          - non-gki-port
+          - official-builtin
+        default: non-gki-port
       KSU_HOOK_MODE:
         description: "Khusus xxksu: syscall = tamper syscall table (tanpa patch source); manual = patch hook di source. Sukisu selalu manual."
         required: true
@@ -78,8 +91,10 @@ jobs:
       KERNEL_BRANCH: ${{ github.event.inputs.KERNEL_BRANCH }}
       KERNEL_CONFIG: ${{ github.event.inputs.KERNEL_CONFIG }}
       CONFIG_FRAGMENTS: ${{ github.event.inputs.CONFIG_FRAGMENTS }}
+      KERNEL_VERSION: ${{ github.event.inputs.KERNEL_VERSION }}
       XXKSU: ${{ github.event.inputs.XXKSU }}
       KSU_VARIANT: ${{ github.event.inputs.KSU_VARIANT }}
+      SUKISU_SOURCE: ${{ github.event.inputs.SUKISU_SOURCE }}
       KSU_HOOK_MODE: ${{ github.event.inputs.KSU_HOOK_MODE }}
       ANTI_FLICKER: ${{ github.event.inputs.ANTI_FLICKER }}
       LTO_MODE: ${{ github.event.inputs.LTO_MODE }}
@@ -106,6 +121,7 @@ jobs:
             "Source : ${KERNEL_SOURCE}" \
             "Branch : ${KERNEL_BRANCH}" \
             "Config : ${KERNEL_CONFIG} ${CONFIG_FRAGMENTS}" \
+            "Versi  : ${KERNEL_VERSION:-asli}" \
             "KSU    : ${XXKSU} (${KSU_VARIANT})" \
             "LTO    : ${LTO_MODE}" \
             "AntiKedip : ${ANTI_FLICKER}" \
@@ -184,6 +200,27 @@ jobs:
           cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
+      # Opsi versi kernel: timpa VERSION/PATCHLEVEL/SUBLEVEL di Makefile utama (LINUX_VERSION_CODE ikut berubah).
+      # Hati-hati: seluruh kernel (bukan cuma KSU) ikut memilih jalur kode sesuai versi baru; 4.4 -> 5.x bisa memunculkan error API.
+      - name: 🧬 Versi kernel (opsional)
+        if: ${{ github.event.inputs.KERNEL_VERSION != '' }}
+        working-directory: kernel
+        run: |
+          if ! printf '%s' "$KERNEL_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::KERNEL_VERSION harus format MAJOR.MINOR.SUBLEVEL (mis: 5.10.200), dapat: '$KERNEL_VERSION'"
+            exit 1
+          fi
+          IFS=. read -r MAJ MIN SUB <<< "$KERNEL_VERSION"
+          echo "--- sebelum"
+          grep -n -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' Makefile | head -n 4
+          sed -i -E "s/^VERSION[[:space:]]*=.*/VERSION = ${MAJ}/; s/^PATCHLEVEL[[:space:]]*=.*/PATCHLEVEL = ${MIN}/; s/^SUBLEVEL[[:space:]]*=.*/SUBLEVEL = ${SUB}/" Makefile
+          echo "--- sesudah"
+          grep -n -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' Makefile | head -n 4
+          if ! grep -qE "^VERSION = ${MAJ}\$" Makefile; then
+            echo "::error::Makefile tidak berubah (pola VERSION tidak cocok)"
+            exit 1
+          fi
+
       - name: 🛠️ Setup Clang (Proton-Clang) & GCC
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
@@ -225,11 +262,16 @@ jobs:
 
       # Integrasi SukiSU-Ultra branch builtin (non-GKI, tanpa kprobes, hook dipasang manual di source).
       # Magic Mount ada di ksud milik manager SukiSU, jadi tidak butuh metamodule.
+      # builtin resmi hanya lengkap untuk kernel 5.10+ (selinux_hide, fallthrough, dll); kernel 4.x pakai port non-GKI.
       - name: 📥 Integrasi SukiSU-Ultra (builtin)
         if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'sukisu' }}
         working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          if [ "$SUKISU_SOURCE" = "official-builtin" ]; then
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          else
+            curl -LSs "https://raw.githubusercontent.com/xiziya/SukiSU_Non-GKI/builtin/kernel/setup.sh" | sh
+          fi
           echo "--- hasil integrasi"
           ls -la drivers/ | grep -i -E "kernelsu" || true
           grep -n -i "kernelsu" drivers/Makefile drivers/Kconfig || true
