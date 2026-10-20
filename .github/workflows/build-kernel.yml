@@ -1,4 +1,4 @@
-name: Manual Build Kernel - BTX FIXED Full LTO MamboSU
+name: Manual Build Kernel - BTX FIXED 4.19 Full LTO MamboSU
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       KERNEL_CONFIG:
-        description: "Nama defconfig"
+        description: "Nama defconfig (mis: lavender_defconfig)"
         required: true
         type: string
       CONFIG_FRAGMENTS:
@@ -54,7 +54,7 @@ on:
           - manual
         default: syscall
       LTO_MODE:
-        description: "Mode LTO full/thin/none"
+        description: "Mode LTO full/thin/none - 4.19 pake full"
         required: true
         type: choice
         options:
@@ -63,7 +63,7 @@ on:
           - full
         default: full
       CLANG_REV:
-        description: "Revisi AOSP clang"
+        description: "Revisi AOSP clang - clang-r596125 = clang 22"
         required: true
         type: string
         default: "clang-r596125"
@@ -72,9 +72,10 @@ on:
         type: string
         default: "lavender"
       EXTRAVERSION:
+        description: "Nama Kernel"
         required: false
         type: string
-        default: "MamboSU-FULL-LTO"
+        default: "MamboSU-FULL-LTO-4.19"
 
 permissions:
   contents: write
@@ -109,16 +110,17 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then exit 0; fi
-          TEXT=$(printf '%s\n' "🚀 Build dimulai" "Kernel : ${EXTRAVERSION:-$CODENAME} (${CODENAME})" "Source : ${KERNEL_SOURCE}" "Branch : ${KERNEL_BRANCH}" "Config : ${KERNEL_CONFIG}" "KSU : ${XXKSU} (${KSU_VARIANT}) - MamboSU" "LTO : ${LTO_MODE} - FULL MODE" "Clang : ${CLANG_REV}" "Run : ${RUN_URL}")
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode chat_id="${CHAT_ID}" --data-urlencode text="${TEXT}" -d disable_web_page_preview=true
+          TEXT=$(printf '%s\n' "🚀 Build 4.19 dimulai" "Kernel : ${EXTRAVERSION:-$CODENAME}" "Source : ${KERNEL_SOURCE}" "Branch : ${KERNEL_BRANCH}" "KSU : MamboSU xxksu" "LTO : ${LTO_MODE} FULL" "Clang : ${CLANG_REV} (22)" "Run : ${RUN_URL}")
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode chat_id="${CHAT_ID}" --data-urlencode text="${TEXT}"
 
       - name: 🧹 Free disk space
         run: |
+          df -h
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /usr/local/julia* /usr/share/miniconda /usr/local/share/chromium || true
           sudo apt-get clean
           sudo docker image prune --all --force || true
 
-      - name: 💾 Swap 32GB (Anti OOM Full LTO)
+      - name: 💾 Swap 32GB Anti OOM Full LTO 4.19
         run: |
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile /swapfile
@@ -138,7 +140,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential bc bison flex libssl-dev libelf-dev git curl wget zip unzip python3 python-is-python3 cpio kmod rsync ccache dwarves libncurses-dev device-tree-compiler
 
-      - name: 📥 Clone kernel source
+      - name: 📥 Clone kernel source 4.19
         run: |
           git clone --depth=1 --recurse-submodules --shallow-submodules -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" kernel
           cd kernel
@@ -146,30 +148,54 @@ jobs:
           cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
-      - name: 🛠️ Setup AOSP Clang & GCC (Clang 22)
+      - name: 🧬 Versi kernel (opsional)
+        if: ${{ github.event.inputs.KERNEL_VERSION != '' }}
+        working-directory: kernel
         run: |
+          IFS=. read -r MAJ MIN SUB <<< "$KERNEL_VERSION"
+          sed -i -E "s/^VERSION[[:space:]]*=.*/VERSION = ${MAJ}/; s/^PATCHLEVEL[[:space:]]*=.*/PATCHLEVEL = ${MIN}/; s/^SUBLEVEL[[:space:]]*=.*/SUBLEVEL = ${SUB}/" Makefile
+          grep -n -E '^(VERSION|PATCHLEVEL|SUBLEVEL)' Makefile | head -n 4
+
+      - name: 🛠️ Setup AOSP Clang & GCC (FIXED 400 - 4.19)
+        run: |
+          mkdir -p toolchain
+          echo "Clone clang $CLANG_REV via sparse-checkout (fix error 400)..."
+          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang-tmp --depth 1 --filter=blob:none --sparse
+          cd clang-tmp
+          git sparse-checkout set ${CLANG_REV}
+          cd ..
           mkdir -p toolchain/clang
-          curl -fL --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_REV}.tar.gz" | tar -xz -C toolchain/clang
+          cp -r clang-tmp/${CLANG_REV}/* toolchain/clang/ || cp -r clang-tmp/${CLANG_REV}/. toolchain/clang/
+          rm -rf clang-tmp
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
           echo "$(pwd)/toolchain/clang/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
           toolchain/clang/bin/clang --version
+          ld.lld --version || true
+
+      - name: 📋 Cek defconfig & fragment
+        working-directory: kernel
+        run: |
+          CFG_DIR="arch/arm64/configs"
+          ls "$CFG_DIR" | grep lavender || true
+          if [ ! -f "$CFG_DIR/$KERNEL_CONFIG" ]; then echo "::error::$CFG_DIR/$KERNEL_CONFIG tidak ada"; exit 1; fi
 
       - name: 📥 Integrasi xxksu (RapliVx - MamboSU) - FIXED
         if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'xxksu' }}
         working-directory: kernel
         run: |
           curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu MamboSU
+          echo "--- hasil integrasi"
           ls -la drivers/ | grep -i kernelsu || true
 
-      - name: 🛡️ Aktifkan KSU Simple (echo/sed - No nano)
+      - name: 🛡️ Aktifkan KSU Simple echo/sed (Request lu)
         if: ${{ github.event.inputs.XXKSU == 'true' }}
         working-directory: kernel
         run: |
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
-          echo "=== SET KSU SIMPLE MODE ==="
+          echo "=== SET KSU SIMPLE 4.19 ==="
           sed -i '/CONFIG_KSU/d' "$CFG"
           sed -i '/CONFIG_KPROBES/d' "$CFG"
           sed -i '/CONFIG_KPM/d' "$CFG"
@@ -178,50 +204,44 @@ jobs:
           echo "# CONFIG_KPROBES is not set" >> "$CFG"
           echo "CONFIG_KSU_SUSFS=n" >> "$CFG"
           echo "# CONFIG_KSU_WITH_KPROBES is not set" >> "$CFG"
-          grep -n "CONFIG_KSU" "$CFG" | tail -n 10
+          echo "# CONFIG_KPM is not set" >> "$CFG"
+          grep -n "CONFIG_KSU" "$CFG" | tail -n 20
 
-      - name: 🔨 Build Kernel Full LTO Anti-Limit
+      - name: 🔨 Build Kernel 4.19 Full LTO MamboSU Anti Limit
         working-directory: kernel
         run: |
           set -o pipefail
           export ARCH=arm64
           export SUBARCH=arm64
-          ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
+          ARGS="O=out ARCH=arm64 LLVM=1 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
           make $ARGS "$KERNEL_CONFIG" $CONFIG_FRAGMENTS 2>&1 | tee build.log
           LV=$(printf '%s' "${EXTRAVERSION:-$CODENAME}" | tr -cd 'A-Za-z0-9._-')
-          [ -z "$LV" ] && LV="$CODENAME"
+          [ -z "$LV" ] && LV="MamboSU-4.19"
           scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-${LV}"
           scripts/config --file out/.config --disable CONFIG_LOCALVERSION_AUTO
           echo "Mode LTO: $LTO_MODE"
-          case "$LTO_MODE" in
-            full)
-              scripts/config --file out/.config --enable CONFIG_LTO_CLANG
-              scripts/config --file out/.config --enable CONFIG_LTO_CLANG_FULL
-              scripts/config --file out/.config --disable CONFIG_THINLTO
-              ;;
-            thin)
-              scripts/config --file out/.config --enable CONFIG_LTO_CLANG
-              scripts/config --file out/.config --enable CONFIG_THINLTO
-              ;;
-            none)
-              scripts/config --file out/.config --disable CONFIG_LTO_CLANG
-              ;;
-          esac
+          scripts/config --file out/.config --enable CONFIG_LTO_CLANG
+          scripts/config --file out/.config --enable CONFIG_LTO_CLANG_FULL
+          scripts/config --file out/.config --disable CONFIG_THINLTO
+          scripts/config --file out/.config --disable CONFIG_LTO_NONE
+          # Force KSU lagi di out/.config pake echo simple
           sed -i '/CONFIG_KSU/d' out/.config
+          sed -i '/CONFIG_KPROBES/d' out/.config
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> out/.config
           echo "# CONFIG_KPROBES is not set" >> out/.config
           echo "CONFIG_KSU_SUSFS=n" >> out/.config
           make $ARGS olddefconfig 2>&1 | tee -a build.log
-          if [ "$LTO_MODE" = "full" ]; then JOBS=2; else JOBS=$(nproc --all); fi
-          echo "Building with -j${JOBS}"
+          echo "--- cek config 4.19"
+          grep -E "CONFIG_LTO|CONFIG_KSU" out/.config | tail -n 20
+          echo "Build 4.19 Full LTO pake -j2 biar gak OOM"
           set +e
-          make -k -j${JOBS} $ARGS Image.gz-dtb 2>&1 | tee -a build.log
+          make -k -j2 $ARGS Image.gz-dtb 2>&1 | tee -a build.log
           set -e
           BOOT=out/arch/arm64/boot
           if [ ! -f "$BOOT/Image.gz-dtb" ]; then
             set +e
-            make -k -j${JOBS} $ARGS Image.gz dtbs 2>&1 | tee -a build.log
+            make -k -j2 $ARGS Image.gz dtbs 2>&1 | tee -a build.log
             set -e
             if [ -f "$BOOT/Image.gz" ]; then
               DTBS=$(find "$BOOT/dts" -name '*.dtb' | sort)
@@ -230,7 +250,7 @@ jobs:
           fi
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
           [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" \) | head -n1)
-          if [ -z "$IMG" ]; then echo "Build gagal!" | tee -a build.log; exit 1; fi
+          if [ -z "$IMG" ]; then echo "Build gagal!"; exit 1; fi
           echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
 
       - name: 🏷️ Setup file names
@@ -266,7 +286,15 @@ jobs:
         continue-on-error: true
         run: |
           if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then exit 0; fi
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"${ZIP_PATH}" -F caption="✅ Build Berhasil: ${BASE_NAME} - Full LTO MamboSU"
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"${ZIP_PATH}" -F caption="✅ Build Berhasil 4.19: ${BASE_NAME} - Full LTO MamboSU"
+
+      - name: 🔎 Diagnosa memori (OOM?)
+        if: failure()
+        continue-on-error: true
+        run: |
+          free -h || true
+          swapon --show || true
+          sudo dmesg | grep -i -E "out of memory|oom-kill" | tail -n 10 || true
 
       - name: "📤 Telegram: Kirim Log saat Gagal (FIXED ANTI-LIMIT)"
         if: failure()
@@ -285,5 +313,5 @@ jobs:
           tail -c 40000000 "$LOG" > build-log-trimmed.log
           gzip -9 -c build-log-trimmed.log > build-log.gz
           ls -lh errors.txt build-log.gz
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"errors.txt" -F caption="❌ ${CODENAME} Full LTO Gagal - Error"
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"errors.txt" -F caption="❌ ${CODENAME} 4.19 Full LTO Gagal - Error"
           curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"build-log.gz" -F caption="Log lengkap trimmed 40MB"
