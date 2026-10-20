@@ -1,4 +1,4 @@
-name: Manual Build Kernel - BTX (lavender 4.19)
+name: Manual Build Kernel - BTX FIXED Full LTO MamboSU
 
 on:
   workflow_dispatch:
@@ -12,35 +12,34 @@ on:
         required: true
         type: string
       KERNEL_CONFIG:
-        description: "Nama defconfig (mis: lavender_defconfig)"
+        description: "Nama defconfig"
         required: true
         type: string
       CONFIG_FRAGMENTS:
-        description: "Fragment config yang di-merge (pisah spasi), kosongkan kalau tidak ada"
+        description: "Fragment config yang di-merge (pisah spasi)"
         required: false
         type: string
         default: ""
       KERNEL_VERSION:
-        description: "Opsi versi kernel (MAJOR.MINOR.SUBLEVEL, mis: 5.10.200). Menimpa VERSION/PATCHLEVEL/SUBLEVEL di Makefile supaya blok #if LINUX_VERSION_CODE di SukiSU ikut aktif. Kosongkan = versi asli source"
+        description: "Opsi versi kernel"
         required: false
         type: string
         default: ""
       XXKSU:
-        description: "Aktifkan KernelSU (varian dipilih di KSU_VARIANT). Default mati = build kernel polos tanpa KSU"
+        description: "Aktifkan KernelSU"
         required: true
         type: boolean
-        default: false
+        default: true
       KSU_VARIANT:
-        description: "Varian KSU: sukisu = SukiSU-Ultra branch builtin (Magic Mount bawaan manager, hook manual otomatis); xxksu = backslashxx; finasu = LyraVoid/FinaSU (EKSPERIMENTAL, builtin, hook otomatis via tracepoint+kprobes, tanpa patch hook source)"
+        description: "Varian KSU"
         required: true
         type: choice
         options:
           - sukisu
           - xxksu
           - finasu
-        default: sukisu
+        default: xxksu
       SUKISU_SOURCE:
-        description: "Khusus sukisu: non-gki-port = xiziya/SukiSU_Non-GKI (builtin + compat kernel <5.10); official-builtin = SukiSU-Ultra resmi (hanya jalan di kernel 5.10+)"
         required: true
         type: choice
         options:
@@ -48,7 +47,6 @@ on:
           - official-builtin
         default: non-gki-port
       KSU_HOOK_MODE:
-        description: "Khusus xxksu: syscall = tamper syscall table (tanpa patch source); manual = patch hook di source. Sukisu selalu manual."
         required: true
         type: choice
         options:
@@ -56,29 +54,27 @@ on:
           - manual
         default: syscall
       LTO_MODE:
-        description: "Mode LTO (full/thin hanya jalan kalau source punya CONFIG_LTO_CLANG; kalau tidak, diabaikan)"
+        description: "Mode LTO full/thin/none"
         required: true
         type: choice
         options:
           - none
           - thin
           - full
-        default: thin
+        default: full
       CLANG_REV:
-        description: "Revisi AOSP clang (folder di platform/prebuilts/clang/host/linux-x86, mis: clang-r596125 = clang 22)"
+        description: "Revisi AOSP clang"
         required: true
         type: string
         default: "clang-r596125"
       CODENAME:
-        description: "Codename device"
         required: true
         type: string
         default: "lavender"
       EXTRAVERSION:
-        description: "EXTRAVERSION / Nama Kernel"
         required: false
         type: string
-        default: "NMメPROJECT"
+        default: "MamboSU-FULL-LTO"
 
 permissions:
   contents: write
@@ -86,7 +82,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 360
     env:
       KERNEL_SOURCE: ${{ github.event.inputs.KERNEL_SOURCE }}
       KERNEL_BRANCH: ${{ github.event.inputs.KERNEL_BRANCH }}
@@ -112,689 +108,135 @@ jobs:
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-            echo "::warning::BOT_TOKEN/CHAT_ID kosong (secret belum dibuat atau namanya salah), lewati notif Telegram"
-            exit 0
-          fi
-          TEXT=$(printf '%s\n' \
-            "🚀 Build dimulai" \
-            "Kernel : ${EXTRAVERSION:-$CODENAME} (${CODENAME})" \
-            "Source : ${KERNEL_SOURCE}" \
-            "Branch : ${KERNEL_BRANCH}" \
-            "Config : ${KERNEL_CONFIG} ${CONFIG_FRAGMENTS}" \
-            "Versi  : ${KERNEL_VERSION:-asli}" \
-            "KSU    : ${XXKSU} (${KSU_VARIANT})" \
-            "LTO    : ${LTO_MODE}" \
-            "Clang  : ${CLANG_REV}" \
-            "Run    : ${RUN_URL}")
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${CHAT_ID}" \
-            --data-urlencode text="${TEXT}" \
-            -d disable_web_page_preview=true
-          echo
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then exit 0; fi
+          TEXT=$(printf '%s\n' "🚀 Build dimulai" "Kernel : ${EXTRAVERSION:-$CODENAME} (${CODENAME})" "Source : ${KERNEL_SOURCE}" "Branch : ${KERNEL_BRANCH}" "Config : ${KERNEL_CONFIG}" "KSU : ${XXKSU} (${KSU_VARIANT}) - MamboSU" "LTO : ${LTO_MODE} - FULL MODE" "Clang : ${CLANG_REV}" "Run : ${RUN_URL}")
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" --data-urlencode chat_id="${CHAT_ID}" --data-urlencode text="${TEXT}" -d disable_web_page_preview=true
 
       - name: 🧹 Free disk space
         run: |
-          df -h / /mnt
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift \
-            /usr/local/.ghcup /usr/lib/jvm /usr/local/julia* \
-            /usr/share/miniconda /usr/local/share/chromium || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/lib/jvm /usr/local/julia* /usr/share/miniconda /usr/local/share/chromium || true
           sudo apt-get clean
           sudo docker image prune --all --force || true
-          echo "--- setelah dibersihkan"
-          df -h / /mnt
 
-      - name: 📊 Cek RAM dan disk
-        run: |
-          nproc
-          free -h
-          df -h "$GITHUB_WORKSPACE" / /mnt
-
-      - name: 📦 Install build dependencies
-        timeout-minutes: 15
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential bc bison flex libssl-dev libelf-dev \
-            git curl wget zip unzip python3 python-is-python3 \
-            cpio kmod rsync ccache dwarves libncurses-dev \
-            device-tree-compiler
-
-      - name: 💾 Swap (dibagi /mnt dan /)
+      - name: 💾 Swap 32GB (Anti OOM Full LTO)
         run: |
           sudo swapoff -a || true
           sudo rm -f /mnt/swapfile /swapfile
-          mkswp() {  # path, maks GB, sisa GB yang harus tetap bebas
-            A=$(df --output=avail -BG "$(dirname "$1")" | tail -n1 | tr -dc 0-9)
-            S=$(( A - $3 ))
-            [ "$S" -gt "$2" ] && S=$2
-            if [ "$S" -lt 2 ]; then
-              echo "Lewati swap $1 (ruang bebas ${A}G tidak cukup)"
-              return 0
-            fi
-            echo "Buat swap $1 ${S}G (bebas ${A}G)"
-            sudo fallocate -l ${S}G "$1"
-            sudo chmod 600 "$1"
-            sudo mkswap "$1"
-            sudo swapon "$1"
-          }
-          mkswp /mnt/swapfile 16 2
-          mkswp /swapfile 16 18
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
           swapon --show
           free -h
-          df -h / /mnt
 
-      - name: 🗃️ Setup ccache
+      - name: 📦 Install build dependencies
         run: |
-          mkdir -p ~/.ccache
-          echo "USE_CCACHE=1" >> $GITHUB_ENV
-          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bc bison flex libssl-dev libelf-dev git curl wget zip unzip python3 python-is-python3 cpio kmod rsync ccache dwarves libncurses-dev device-tree-compiler
 
       - name: 📥 Clone kernel source
         run: |
           git clone --depth=1 --recurse-submodules --shallow-submodules -b "$KERNEL_BRANCH" "$KERNEL_SOURCE" kernel
           cd kernel
-          if git submodule status | grep -qE '^-'; then
-            git submodule update --init --recursive
-          fi
+          if git submodule status | grep -qE '^-'; then git submodule update --init --recursive; fi
           cd ..
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
-      # Opsi versi kernel: timpa VERSION/PATCHLEVEL/SUBLEVEL di Makefile utama (LINUX_VERSION_CODE ikut berubah).
-      # Hati-hati: seluruh kernel (bukan cuma KSU) ikut memilih jalur kode sesuai versi baru.
-      - name: 🧬 Versi kernel (opsional)
-        if: ${{ github.event.inputs.KERNEL_VERSION != '' }}
-        working-directory: kernel
-        run: |
-          if ! printf '%s' "$KERNEL_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::KERNEL_VERSION harus format MAJOR.MINOR.SUBLEVEL (mis: 5.10.200), dapat: '$KERNEL_VERSION'"
-            exit 1
-          fi
-          IFS=. read -r MAJ MIN SUB <<< "$KERNEL_VERSION"
-          echo "--- sebelum"
-          grep -n -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' Makefile | head -n 4
-          sed -i -E "s/^VERSION[[:space:]]*=.*/VERSION = ${MAJ}/; s/^PATCHLEVEL[[:space:]]*=.*/PATCHLEVEL = ${MIN}/; s/^SUBLEVEL[[:space:]]*=.*/SUBLEVEL = ${SUB}/" Makefile
-          echo "--- sesudah"
-          grep -n -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' Makefile | head -n 4
-          if ! grep -qE "^VERSION = ${MAJ}\$" Makefile; then
-            echo "::error::Makefile tidak berubah (pola VERSION tidak cocok)"
-            exit 1
-          fi
-
-      # AOSP clang diambil sebagai tarball satu folder revisi saja (clone penuh repo prebuilts berukuran sangat besar).
-      # GCC 4.9 AOSP tetap dipakai untuk binutils (as) dan prefix CROSS_COMPILE.
-      - name: 🛠️ Setup AOSP Clang & GCC
+      - name: 🛠️ Setup AOSP Clang & GCC (Clang 22)
         run: |
           mkdir -p toolchain/clang
-          curl -fL --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_REV}.tar.gz" \
-            | tar -xz -C toolchain/clang
+          curl -fL --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_REV}.tar.gz" | tar -xz -C toolchain/clang
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
-
           echo "$(pwd)/toolchain/clang/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
-
           toolchain/clang/bin/clang --version
 
-      - name: 📋 Cek defconfig & fragment
-        working-directory: kernel
-        run: |
-          CFG_DIR="arch/arm64/configs"
-          if [ ! -f "$CFG_DIR/$KERNEL_CONFIG" ]; then
-            echo "::error::$CFG_DIR/$KERNEL_CONFIG tidak ada"
-            ls "$CFG_DIR" | grep -i -E "lavender|sdm660|trinket" || ls "$CFG_DIR"
-            exit 1
-          fi
-          for f in $CONFIG_FRAGMENTS; do
-            if [ ! -f "$CFG_DIR/$f" ]; then
-              echo "::error::$CFG_DIR/$f tidak ada"
-              ls "$CFG_DIR"
-              exit 1
-            fi
-            echo "=== isi $f"
-            cat "$CFG_DIR/$f"
-          done
-
-      # Integrasi xxksu ke source via setup.sh (credit: @linx3141)
-      - name: 📥 Integrasi xxksu (curl setup.sh)
+      - name: 📥 Integrasi xxksu (RapliVx - MamboSU) - FIXED
         if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'xxksu' }}
         working-directory: kernel
         run: |
-          curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
-          echo "--- hasil integrasi"
-          ls -la drivers/ | grep -i -E "kernelsu|xxksu" || true
-          grep -n -i "kernelsu" drivers/Makefile drivers/Kconfig || true
-
-      # Integrasi SukiSU-Ultra branch builtin (non-GKI, tanpa kprobes, hook dipasang manual di source).
-      # Magic Mount ada di ksud milik manager SukiSU, jadi tidak butuh metamodule.
-      # builtin resmi hanya lengkap untuk kernel 5.10+ (selinux_hide, fallthrough, dll); kernel 4.x pakai port non-GKI.
-      - name: 📥 Integrasi SukiSU-Ultra (builtin)
-        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'sukisu' }}
-        working-directory: kernel
-        run: |
-          if [ "$SUKISU_SOURCE" = "official-builtin" ]; then
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
-          else
-            curl -LSs "https://raw.githubusercontent.com/xiziya/SukiSU_Non-GKI/builtin/kernel/setup.sh" | sh
-          fi
-          echo "--- hasil integrasi"
-          ls -la drivers/ | grep -i -E "kernelsu" || true
-          grep -n -i "kernelsu" drivers/Makefile drivers/Kconfig || true
-          for f in drivers/kernelsu/Kconfig drivers/kernelsu/runtime/ksud.c drivers/kernelsu/feature/sucompat.c; do
-            if [ -f "$f" ]; then echo "ok    $f"; else echo "::error::$f tidak ada (setup.sh builtin gagal / struktur repo berubah)"; exit 1; fi
-          done
-          echo "--- Kconfig SukiSU (builtin)"
-          grep -n -E "^config |depends on" drivers/kernelsu/Kconfig | head -n 40 || true
-
-      # Integrasi FinaSU (LyraVoid/FinaSU) sebagai driver builtin, meniru cara setup.sh KernelSU:
-      # symlink kernel/ repo ke drivers/kernelsu + daftar di drivers/Makefile & drivers/Kconfig.
-      # FinaSU tidak butuh patch hook di source: hook lewat tracepoint sys_enter + kretprobe (butuh KPROBES, KRETPROBES,
-      # HAVE_SYSCALL_TRACEPOINTS, EXT4_FS). Repo ini ditulis untuk kernel yang lebih baru (GKI 5.10+), jadi kompatibilitas
-      # 4.19 BELUM terbukti: kalau gagal compile, lihat log error di Telegram.
-      - name: 📥 Integrasi FinaSU (builtin, eksperimental)
-        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'finasu' }}
-        working-directory: kernel
-        run: |
-          git clone --depth=1 https://github.com/LyraVoid/FinaSU FinaSU
-          echo "FinaSU commit: $(git -C FinaSU rev-parse --short HEAD)"
-          for f in FinaSU/kernel/Kbuild FinaSU/kernel/Kconfig; do
-            if [ -f "$f" ]; then echo "ok    $f"; else echo "::error::$f tidak ada (struktur repo FinaSU berubah)"; exit 1; fi
-          done
-          ln -sfn ../FinaSU/kernel drivers/kernelsu
-          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
-          echo "--- hasil integrasi"
+          curl -LSs "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" | bash -s xxksu MamboSU
           ls -la drivers/ | grep -i kernelsu || true
-          tail -n 3 drivers/Kconfig
-          grep -n kernelsu drivers/Makefile
-          echo "--- Kconfig FinaSU"
-          grep -n -E "^config |depends on|default" drivers/kernelsu/Kconfig | head -n 40 || true
-          echo "--- cek dukungan kernel untuk hook FinaSU"
-          grep -n -E "config HAVE_SYSCALL_TRACEPOINTS|config HAVE_KRETPROBES" arch/arm64/Kconfig arch/Kconfig || true
-          grep -rn "register_trace_prio_sys_enter\|tracepoint_probe_register_prio" include/ kernel/tracepoint.c 2>/dev/null | head -n 3 || echo "::warning::API tracepoint prio tidak terlihat di source ini"
 
-      # Pasang hook syscall manual KSU otomatis (scope-minimized, dari backslashxx/KernelSU issue #5).
-      # Tiap hook hanya dipasang kalau handler-nya ada di driver KSU dan pola kodenya cocok.
-      # xxksu: hanya mode manual. sukisu (builtin): selalu jalan. finasu: tidak pakai hook manual (lihat step integrasi).
-      - name: 🪝 Pasang hook manual KSU otomatis
-        if: ${{ github.event.inputs.XXKSU == 'true' && (github.event.inputs.KSU_VARIANT == 'sukisu' || (github.event.inputs.KSU_VARIANT == 'xxksu' && github.event.inputs.KSU_HOOK_MODE == 'manual')) }}
-        working-directory: kernel
-        run: |
-          cat > /tmp/ksu_hooks.py << 'PYEOF'
-          import os, re, sys
-
-          SUKI = os.environ.get('KSU_VARIANT') == 'sukisu'
-
-          def read(p):
-              with open(p, encoding='utf-8', errors='surrogateescape') as f:
-                  return f.read()
-
-          def write(p, t):
-              with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:
-                  f.write(t)
-
-          ksu_src = ""
-          for root, _, files in os.walk('drivers/kernelsu', followlinks=True):
-              for fn in files:
-                  if fn.endswith(('.c', '.h')):
-                      ksu_src += read(os.path.join(root, fn)) + "\n"
-
-          def have(sym):
-              """True kalau simbol benar-benar DIDEFINISIKAN di driver KSU (bukan sekadar disebut/extern/dipanggil)."""
-              if not ksu_src:
-                  return True
-              n = re.escape(sym)
-              var = re.search(r'^(?!\s*extern\b)[ \t\w\*]*\b(?:bool|int)\b[ \t\w\*]*\b' + n + r'\b[ \t\w]*(?:=|;)', ksu_src, re.M)
-              fn = re.search(r'^(?!\s*(?:static|extern|if|while|return)\b)[ \t\w\*]*\b' + n + r'\s*\([^;{]*\)\s*\{', ksu_src, re.M)
-              return bool(var or fn)
-
-          applied, skipped = [], []
-
-          def line_start(t, pos):
-              return t.rfind('\n', 0, pos) + 1
-
-          def before_header(t, header_re, text):
-              m = re.search(header_re, t, re.M)
-              if not m:
-                  return None
-              ls = line_start(t, m.start())
-              return t[:ls] + text + t[ls:]
-
-          def after_header_brace(t, header_re, text):
-              m = re.search(header_re, t, re.M | re.S)
-              if not m:
-                  return None
-              return t[:m.end()] + "\n" + text + t[m.end():]
-
-          def before_target(t, header_re, target_re, text):
-              m = re.search(header_re, t, re.M | re.S)
-              if not m:
-                  return None
-              n = re.search(target_re, t[m.end():], re.M)
-              if not n:
-                  return None
-              pos = line_start(t, m.end() + n.start())
-              return t[:pos] + text + t[pos:]
-
-          def patch(path, label, need, marker, fn):
-              if not os.path.exists(path):
-                  skipped.append(f"{label}: {path} tidak ada"); return
-              for s in need:
-                  if not have(s):
-                      skipped.append(f"{label}: driver KSU tidak mendefinisikan '{s}' (hook dilewati)"); return
-              t = read(path)
-              if marker in t:
-                  skipped.append(f"{label}: sudah terpasang"); return
-              r = fn(t)
-              if r is None:
-                  skipped.append(f"{label}: pola kode di {path} tidak cocok (pasang manual)"); return
-              write(path, r)
-              applied.append(f"{label} ({path})")
-
-          # ---- input: safemode (xxksu saja; SukiSU pakai input handler sendiri, hook ini dead code) ----
-          def f_input(t):
-              ext = ("#ifdef CONFIG_KSU\n"
-                     "extern bool ksu_input_hook __read_mostly;\n"
-                     "extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n"
-                     "#endif\n\n")
-              t2 = before_header(t, r'^static void input_handle_event\(', ext)
-              if t2 is None: return None
-              if have('ksu_input_hook'):
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tif (unlikely(ksu_input_hook))\n"
-                          "\t\tksu_handle_input_handle_event(&type, &code, &value);\n"
-                          "#endif\n")
-              else:
-                  t2 = t2.replace("extern bool ksu_input_hook __read_mostly;\n", "")
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tksu_handle_input_handle_event(&type, &code, &value);\n"
-                          "#endif\n")
-              m = re.search(r'^static void input_handle_event\(.*?\{\s*\n\s*int disposition = input_get_disposition\(dev, type, code, &value\);\n', t2, re.M | re.S)
-              if not m: return None
-              return t2[:m.end()] + call + t2[m.end():]
-          if not SUKI:
-              patch('drivers/input/input.c', 'input (safemode)', ['ksu_handle_input_handle_event'], 'ksu_handle_input_handle_event', f_input)
-
-          # ---- devpts (xxksu saja; SukiSU builtin tidak punya handler ini) ----
-          def f_devpts(t):
-              hm = re.search(r'^void \*devpts_get_priv\(\s*struct (dentry|inode)\s*\*\s*(\w+)\s*\)\s*\{', t, re.M)
-              if not hm: return None
-              arg = f"{hm.group(2)}->d_inode" if hm.group(1) == 'dentry' else hm.group(2)
-              ext = "#ifdef CONFIG_KSU\nextern int ksu_handle_devpts(struct inode*);\n#endif\n\n"
-              ls = line_start(t, hm.start())
-              t = t[:ls] + ext + t[ls:]
-              hm = re.search(r'^void \*devpts_get_priv\(\s*struct (dentry|inode)\s*\*\s*(\w+)\s*\)\s*\{', t, re.M)
-              call = f"#ifdef CONFIG_KSU\n\tksu_handle_devpts({arg});\n#endif\n"
-              return t[:hm.end()] + "\n" + call + t[hm.end():]
-          if not SUKI:
-              patch('fs/devpts/inode.c', 'devpts', ['ksu_handle_devpts'], 'ksu_handle_devpts', f_devpts)
-
-          # ---- exec.c: execveat ----
-          # xxksu : ksu_handle_execveat
-          # sukisu: ksu_handle_execveat_ksud (saat ksu_execveat_hook aktif) / ksu_handle_execveat_sucompat (sesudahnya)
-          def f_execveat(t):
-              hdr = r'^static int do_execveat_common\([^{;]*?\)\s*\{'
-              if SUKI:
-                  with_su = have('ksu_handle_execveat_sucompat')
-                  ext = ("#ifdef CONFIG_KSU\n"
-                         "extern bool ksu_execveat_hook __read_mostly;\n"
-                         "extern int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr, void *argv,\n"
-                         "\t\t\tvoid *envp, int *flags);\n")
-                  if with_su:
-                      ext += ("extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,\n"
-                              "\t\t\tvoid *envp, int *flags);\n")
-                  ext += "#endif\n\n"
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tif (unlikely(ksu_execveat_hook))\n"
-                          "\t\tksu_handle_execveat_ksud(&fd, &filename, &argv, &envp, &flags);\n")
-                  if with_su:
-                      call += ("\telse\n"
-                               "\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n")
-                  call += "#endif\n\n"
-                  t2 = before_header(t, hdr, ext)
-                  if t2 is None: return None
-                  return before_target(t2, hdr, r'^\s*if \(IS_ERR\(filename\)\)', call)
-              ext = ("#ifdef CONFIG_KSU\n"
-                     "extern bool ksu_execveat_hook __read_mostly;\n"
-                     "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,\n"
-                     "\t\t\tvoid *envp, int *flags);\n"
-                     "#endif\n\n")
-              t2 = before_header(t, hdr, ext)
-              if t2 is None: return None
-              if have('ksu_execveat_hook'):
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tif (unlikely(ksu_execveat_hook))\n"
-                          "\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-                          "#endif\n\n")
-              else:
-                  t2 = t2.replace("extern bool ksu_execveat_hook __read_mostly;\n", "", 1)
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-                          "#endif\n\n")
-              return before_target(t2, hdr, r'^\s*if \(IS_ERR\(filename\)\)', call)
-          patch('fs/exec.c', 'execveat', ['ksu_handle_execveat_ksud' if SUKI else 'ksu_handle_execveat'], 'ksu_handle_execveat', f_execveat)
-
-          # ---- exec.c: sucompat (execve + compat) ----
-          def f_sucompat(t):
-              ext = ("#ifdef CONFIG_KSU\n"
-                     "extern bool ksu_execveat_hook __read_mostly;\n"
-                     "extern int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,\n"
-                     "\t\t\t       void *__never_use_argv, void *__never_use_envp,\n"
-                     "\t\t\t       int *__never_use_flags);\n"
-                     "int at_fdcwd = AT_FDCWD;\n"
-                     "#endif\n\n")
-              if have('ksu_execveat_hook'):
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tif (!ksu_execveat_hook)\n"
-                          "\t\tksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL);\n"
-                          "#endif\n")
-              else:
-                  ext = ext.replace("extern bool ksu_execveat_hook __read_mostly;\n", "")
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\tksu_handle_execve_sucompat(&at_fdcwd, &filename, NULL, NULL, NULL);\n"
-                          "#endif\n")
-              h1 = r'^SYSCALL_DEFINE3\(execve,[^{;]*\{'
-              t = before_header(t, h1, ext)
-              if t is None: return None
-              t = after_header_brace(t, h1, call)
-              if t is None: return None
-              h2 = r'^COMPAT_SYSCALL_DEFINE3\(execve,[^{;]*\{'
-              if re.search(h2, t, re.M | re.S):
-                  t = after_header_brace(t, h2, call)
-              return t
-          patch('fs/exec.c', 'execve sucompat', ['ksu_handle_execve_sucompat'], 'ksu_handle_execve_sucompat', f_sucompat)
-
-          # ---- open.c: faccessat ----
-          def f_faccessat(t):
-              ext = ("#ifdef CONFIG_KSU\n"
-                     "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n"
-                     "\t\t\t                    int *flags);\n"
-                     "#endif\n\n")
-              hdr = r'^SYSCALL_DEFINE3\(faccessat,[^{;]*\{'
-              t2 = before_header(t, hdr, ext)
-              if t2 is None: return None
-              call = "#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\n"
-              return before_target(t2, hdr, r'^\s*if \(mode & ~S_IRWXO\)', call)
-          patch('fs/open.c', 'faccessat', ['ksu_handle_faccessat'], 'ksu_handle_faccessat', f_faccessat)
-
-          # ---- read_write.c: sys_read ----
-          def f_read(t):
-              ext = ("#ifdef CONFIG_KSU\n"
-                     "extern bool ksu_vfs_read_hook __read_mostly;\n"
-                     "extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr,\n"
-                     "\t\t\tsize_t *count_ptr);\n"
-                     "#endif\n\n")
-              hdr = r'^SYSCALL_DEFINE3\(read,[^{;]*\{'
-              t2 = before_header(t, hdr, ext)
-              if t2 is None: return None
-              if have('ksu_vfs_read_hook'):
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\t\tif (unlikely(ksu_vfs_read_hook))\n"
-                          "\t\t\tksu_handle_sys_read(fd, &buf, &count);\n"
-                          "#endif\n")
-              else:
-                  t2 = t2.replace("extern bool ksu_vfs_read_hook __read_mostly;\n", "", 1)
-                  call = ("#ifdef CONFIG_KSU\n"
-                          "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
-                          "#endif\n")
-              return before_target(t2, hdr, r'^\s*ret = vfs_read\(f\.file, buf, count, &pos\);', call)
-          patch('fs/read_write.c', 'sys_read', ['ksu_handle_sys_read'], 'ksu_handle_sys_read', f_read)
-
-          # ---- stat.c ----
-          def make_stat(name):
-              def f(t):
-                  hdr = rf'^SYSCALL_DEFINE4\({name},[^{{;]*\{{'
-                  ext = ("#ifdef CONFIG_KSU\n"
-                         "extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n"
-                         "#endif\n\n")
-                  t2 = before_header(t, hdr, ext)
-                  if t2 is None: return None
-                  call = "#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif\n"
-                  return before_target(t2, hdr, r'^\s*error = vfs_fstatat\(dfd, filename, &stat, flag\);', call)
-              return f
-
-          def stat_all(t):
-              # newfstatat wajib; fstatat64 (32-bit) opsional
-              r = make_stat('newfstatat')(t)
-              if r is None: return None
-              r2 = make_stat('fstatat64')(r)
-              return r2 if r2 is not None else r
-          patch('fs/stat.c', 'stat', ['ksu_handle_stat'], 'ksu_handle_stat', stat_all)
-
-          # ---- stat.c: vfs_fstat (SukiSU saja, opsional: ukuran init.rc ikut ditambah rc KSU) ----
-          def f_fstat(t):
-              hdr = r'^int vfs_fstat\([^{;]*\)\s*\{'
-              ext = ("#ifdef CONFIG_KSU\n"
-                     "extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);\n"
-                     "#endif\n\n")
-              t2 = before_header(t, hdr, ext)
-              if t2 is None: return None
-              m = re.search(hdr, t2, re.M | re.S)
-              n = re.search(r'^[ \t]*error = vfs_getattr\(&f\.file->f_path, stat[^;]*\);\n', t2[m.end():], re.M)
-              if not n: return None
-              pos = m.end() + n.end()
-              call = ("#ifdef CONFIG_KSU\n"
-                      "\t\tif (!error)\n"
-                      "\t\t\tksu_handle_vfs_fstat(fd, &stat->size);\n"
-                      "#endif\n")
-              return t2[:pos] + call + t2[pos:]
-          if SUKI:
-              patch('fs/stat.c', 'vfs_fstat', ['ksu_handle_vfs_fstat'], 'ksu_handle_vfs_fstat', f_fstat)
-
-          print("=== Hook terpasang ===")
-          for a in applied: print("OK    ", a)
-          print("=== Dilewati ===")
-          for s in skipped: print("SKIP  ", s)
-          PYEOF
-          python3 /tmp/ksu_hooks.py
-          echo "--- ringkasan perubahan"
-          git diff --stat || true
-          if [ "$KSU_VARIANT" = "sukisu" ]; then
-            echo "--- SukiSU builtin: setuid/umount lewat LSM task_fix_setuid (butuh CONFIG_SECURITY), tanpa hook source tambahan"
-            grep -n -E "LSM_HOOK_INIT|security_add_hooks" drivers/kernelsu/hook/lsm_hook.c 2>/dev/null | head -n 10 || true
-          else
-            echo "--- handler KSU lain yang butuh hook (setuid / prctl / LSM)"
-            grep -RIn -E "ksu_handle_setuid|ksu_handle_setresuid|ksu_handle_prctl|ksu_handle_rename|ksu_bprm_check|ksu_inode_permission" drivers/kernelsu/ 2>/dev/null | head -n 30 || true
-            echo "--- Kconfig KSU (mode hook)"
-            grep -n -A8 -E "config KSU_LSM_SECURITY_HOOKS|config KSU_WITH_KPROBES|config KSU_MANUAL" drivers/kernelsu/Kconfig 2>/dev/null | head -n 60 || true
-          fi
-
-      # KSU cukup lewat defconfig (tanpa fragment).
-      # xxksu: mode syscall = manual hook, KPROBES mati. sukisu (builtin): tanpa KPROBES, tanpa SUSFS/KPM.
-      # Hook manual (execve, faccessat, stat, read, ...) harus sudah ada di source (sukisu/manual: dipasang step sebelumnya).
-      - name: 🛡️ Aktifkan KSU via defconfig
+      - name: 🛡️ Aktifkan KSU Simple (echo/sed - No nano)
         if: ${{ github.event.inputs.XXKSU == 'true' }}
         working-directory: kernel
         run: |
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
-          scripts/config --file "$CFG" --enable CONFIG_KSU
+          echo "=== SET KSU SIMPLE MODE ==="
+          sed -i '/CONFIG_KSU/d' "$CFG"
+          sed -i '/CONFIG_KPROBES/d' "$CFG"
+          sed -i '/CONFIG_KPM/d' "$CFG"
+          echo "CONFIG_KSU=y" >> "$CFG"
+          echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> "$CFG"
+          echo "# CONFIG_KPROBES is not set" >> "$CFG"
+          echo "CONFIG_KSU_SUSFS=n" >> "$CFG"
+          echo "# CONFIG_KSU_WITH_KPROBES is not set" >> "$CFG"
+          grep -n "CONFIG_KSU" "$CFG" | tail -n 10
 
-          if [ "$KSU_VARIANT" = "finasu" ]; then
-            # FinaSU: KSU depends on KPROBES && EXT4_FS; KPROBES depends on MODULES; hook via kretprobe + tracepoint sys_enter
-            for s in MODULES KPROBES KRETPROBES EXT4_FS; do
-              scripts/config --file "$CFG" --enable CONFIG_${s}
-            done
-          elif [ "$KSU_VARIANT" = "sukisu" ]; then
-            # SUSFS butuh patch kernel terpisah, KPM tidak dipakai
-            scripts/config --file "$CFG" --disable CONFIG_KSU_SUSFS
-            scripts/config --file "$CFG" --disable CONFIG_KPM
-          else
-            scripts/config --file "$CFG" --disable CONFIG_KSU_WITH_KPROBES
-            if [ "$KSU_HOOK_MODE" = "syscall" ]; then
-              # Mode syscall: KSU menimpa syscall table sendiri, tanpa patch hook di source kernel
-              if ! grep -RqsE "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ ; then
-                echo "::error::Versi KSU ini tidak punya KSU_TAMPER_SYSCALL_TABLE (hasil setup.sh bukan versi yang support mode syscall)"
-                ls -la drivers/kernelsu/ KernelSU 2>/dev/null | head -n 20
-                exit 1
-              fi
-              scripts/config --file "$CFG" --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
-              echo "--- Kconfig KSU_TAMPER_SYSCALL_TABLE"
-              grep -RhnE -B1 -A14 "config KSU_TAMPER_SYSCALL_TABLE" drivers/kernelsu/ | head -n 40 || true
-            fi
-          fi
-          grep -n "CONFIG_KSU" "$CFG"
-          [ -d drivers/kernelsu ] && echo "ok    driver KSU: drivers/kernelsu" || echo "::warning::folder driver KSU tidak ketemu, pastikan sudah ada di source"
-
-          if [ "$KSU_VARIANT" = "sukisu" ] || { [ "$KSU_VARIANT" = "xxksu" ] && [ "$KSU_HOOK_MODE" = "manual" ]; }; then
-            echo "--- cek hook manual di source"
-            miss=0
-            chk() {  # file pola
-              if [ -f "$1" ] && grep -q "$2" "$1"; then echo "ok    $1 ($2)"
-              else echo "::warning::hook TIDAK ada: $1 ($2)"; miss=1; fi
-            }
-            if [ "$KSU_VARIANT" = "sukisu" ]; then
-              chk fs/exec.c     "ksu_handle_execveat_ksud"
-              chk fs/exec.c     "ksu_handle_execve_sucompat"
-              chk fs/open.c     "ksu_handle_faccessat"
-              chk fs/stat.c     "ksu_handle_stat"
-              chk fs/read_write.c "ksu_handle_sys_read\\|ksu_handle_vfs_read"
-            else
-              chk fs/exec.c     "ksu_handle_execveat"
-              chk fs/exec.c     "ksu_handle_execve_sucompat\\|ksu_handle_execveat_sucompat"
-              chk fs/open.c     "ksu_handle_faccessat"
-              chk fs/stat.c     "ksu_handle_stat"
-              chk fs/read_write.c "ksu_handle_sys_read\\|ksu_handle_vfs_read"
-              chk drivers/input/input.c "ksu_handle_input_handle_event"
-              grep -rqs "ksu_handle_devpts" fs/devpts drivers/tty && echo "ok    devpts" || { echo "::warning::hook devpts tidak ada"; miss=1; }
-            fi
-            if [ "$miss" = 1 ]; then
-              echo "::warning::Ada hook yang belum terpasang (hook yang tidak didefinisikan driver KSU memang dilewati)"
-            fi
-          fi
-          exit 0
-
-      - name: 🔨 Build Kernel
+      - name: 🔨 Build Kernel Full LTO Anti-Limit
         working-directory: kernel
         run: |
           set -o pipefail
           export ARCH=arm64
           export SUBARCH=arm64
-
-          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
-
+          ARGS="O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
           make $ARGS "$KERNEL_CONFIG" $CONFIG_FRAGMENTS 2>&1 | tee build.log
-
-          # Kernel release max 64 karakter: pakai LOCALVERSION pendek (ASCII), matikan -g<hash>-dirty
           LV=$(printf '%s' "${EXTRAVERSION:-$CODENAME}" | tr -cd 'A-Za-z0-9._-')
           [ -z "$LV" ] && LV="$CODENAME"
           scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-${LV}"
           scripts/config --file out/.config --disable CONFIG_LOCALVERSION_AUTO
-          echo "LOCALVERSION: -${LV}"
-
           echo "Mode LTO: $LTO_MODE"
-          if grep -q "LTO_CLANG" init/Kconfig arch/arm64/Kconfig 2>/dev/null; then
-            case "$LTO_MODE" in
-              full)
-                scripts/config --file out/.config --enable CONFIG_LTO_CLANG
-                scripts/config --file out/.config --disable CONFIG_THINLTO
-                ;;
-              thin)
-                scripts/config --file out/.config --enable CONFIG_LTO_CLANG
-                scripts/config --file out/.config --enable CONFIG_THINLTO
-                ;;
-              none)
-                scripts/config --file out/.config --disable CONFIG_LTO_CLANG
-                ;;
-            esac
-          else
-            echo "Source ini tidak punya LTO_CLANG, mode LTO diabaikan"
-          fi
-
-          if [ "$XXKSU" = "true" ]; then
-            scripts/config --file out/.config --enable CONFIG_KSU
-            if [ "$KSU_VARIANT" = "finasu" ]; then
-              for s in MODULES KPROBES KRETPROBES EXT4_FS; do
-                scripts/config --file out/.config --enable CONFIG_${s}
-              done
-            elif [ "$KSU_VARIANT" = "sukisu" ]; then
-              scripts/config --file out/.config --disable CONFIG_KSU_SUSFS
-              scripts/config --file out/.config --disable CONFIG_KPM
-            else
-              scripts/config --file out/.config --disable CONFIG_KSU_WITH_KPROBES
-              if [ "$KSU_HOOK_MODE" = "syscall" ]; then
-                scripts/config --file out/.config --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
-              fi
-            fi
-          fi
+          case "$LTO_MODE" in
+            full)
+              scripts/config --file out/.config --enable CONFIG_LTO_CLANG
+              scripts/config --file out/.config --enable CONFIG_LTO_CLANG_FULL
+              scripts/config --file out/.config --disable CONFIG_THINLTO
+              ;;
+            thin)
+              scripts/config --file out/.config --enable CONFIG_LTO_CLANG
+              scripts/config --file out/.config --enable CONFIG_THINLTO
+              ;;
+            none)
+              scripts/config --file out/.config --disable CONFIG_LTO_CLANG
+              ;;
+          esac
+          sed -i '/CONFIG_KSU/d' out/.config
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_KSU_TAMPER_SYSCALL_TABLE=y" >> out/.config
+          echo "# CONFIG_KPROBES is not set" >> out/.config
+          echo "CONFIG_KSU_SUSFS=n" >> out/.config
           make $ARGS olddefconfig 2>&1 | tee -a build.log
-
-          if [ "$XXKSU" = "true" ]; then
-            echo "--- CONFIG_KSU* di out/.config"
-            grep -n "CONFIG_KSU" out/.config || true
-            KSU_SYMS="KSU"
-            if [ "$KSU_VARIANT" = "xxksu" ] && [ "$KSU_HOOK_MODE" = "syscall" ]; then KSU_SYMS="KSU KSU_TAMPER_SYSCALL_TABLE"; fi
-            if [ "$KSU_VARIANT" = "finasu" ]; then KSU_SYMS="KSU KPROBES KRETPROBES HAVE_SYSCALL_TRACEPOINTS"; fi
-            for sym in $KSU_SYMS; do
-              grep -q "^CONFIG_${sym}=y" out/.config || {
-                echo "::error::CONFIG_${sym} tidak aktif (dependensi Kconfig belum terpenuhi / simbol tidak ada)" | tee -a build.log
-                grep -n "CONFIG_KSU" out/.config | tee -a build.log || true
-                grep -RhnE -B1 -A14 "config ${sym}\$" drivers/kernelsu/ | head -n 40 | tee -a build.log || true
-                exit 1
-              }
-            done
-            if [ "$KSU_VARIANT" = "finasu" ]; then
-              # FinaSU: SELinux dipakai untuk policy, ext4 untuk dependensi KSU
-              for s in SECURITY SECURITY_SELINUX EXT4_FS; do
-                grep -q "^CONFIG_${s}=y" out/.config || echo "::warning::CONFIG_${s} tidak =y di out/.config (dibutuhkan FinaSU)"
-              done
-            elif [ "$KSU_VARIANT" = "sukisu" ]; then
-              # SukiSU builtin: setuid/umount lewat LSM, nuke_ext4_sysfs butuh ext4
-              for s in SECURITY SECURITY_SELINUX EXT4_FS; do
-                grep -q "^CONFIG_${s}=y" out/.config || echo "::warning::CONFIG_${s} tidak =y di out/.config (dibutuhkan SukiSU)"
-              done
-              grep -q "^CONFIG_KSU_SUSFS=y" out/.config && echo "::warning::KSU_SUSFS aktif padahal kernel belum dipatch SUSFS"
-            else
-              grep -q "^CONFIG_KSU_WITH_KPROBES=y" out/.config && echo "::warning::KPROBES masih aktif"
-            fi
-          fi
-
-          echo "--- Cek LTO di out/.config"
-          grep -n "CONFIG_LTO\|CONFIG_THINLTO" out/.config || true
-          if [ "$LTO_MODE" = "full" ] || [ "$LTO_MODE" = "thin" ]; then
-            if grep -q "^CONFIG_LTO_CLANG=y" out/.config; then
-              echo "LTO_CLANG aktif (mode $LTO_MODE)"
-            else
-              echo "::warning::LTO_CLANG TIDAK aktif: source tidak mendukung LTO, build jalan tanpa LTO"
-            fi
-          fi
-
+          if [ "$LTO_MODE" = "full" ]; then JOBS=2; else JOBS=$(nproc --all); fi
+          echo "Building with -j${JOBS}"
           set +e
-          make -k -j$(nproc --all) $ARGS Image.gz-dtb 2>&1 | tee -a build.log
+          make -k -j${JOBS} $ARGS Image.gz-dtb 2>&1 | tee -a build.log
           set -e
-
           BOOT=out/arch/arm64/boot
-          # Fallback kalau target Image.gz-dtb tidak ada: gabung manual Image.gz + dtb hasil build
           if [ ! -f "$BOOT/Image.gz-dtb" ]; then
             set +e
-            make -k -j$(nproc --all) $ARGS Image.gz dtbs 2>&1 | tee -a build.log
+            make -k -j${JOBS} $ARGS Image.gz dtbs 2>&1 | tee -a build.log
             set -e
             if [ -f "$BOOT/Image.gz" ]; then
               DTBS=$(find "$BOOT/dts" -name '*.dtb' | sort)
-              echo "Jumlah dtb yang berhasil: $(echo "$DTBS" | grep -c .)"
               cat "$BOOT/Image.gz" $DTBS > "$BOOT/Image.gz-dtb"
             fi
           fi
-
           IMG=$(find out/arch/arm64/boot -type f -name "Image.gz-dtb" | head -n1)
           [ -z "$IMG" ] && IMG=$(find out/arch/arm64/boot -type f \( -name "Image.gz" -o -name "Image" \) | head -n1)
-
-          if [ -z "$IMG" ]; then
-            echo "Build gagal, image tidak ditemukan!" | tee -a build.log
-            exit 1
-          fi
-
+          if [ -z "$IMG" ]; then echo "Build gagal!" | tee -a build.log; exit 1; fi
           echo "IMG_PATH=$(pwd)/$IMG" >> $GITHUB_ENV
 
       - name: 🏷️ Setup file names
         run: |
           DATE=$(date +%Y%m%d)
-          if [ -n "$EXTRAVERSION" ]; then
-            BASE_NAME="${EXTRAVERSION}-${CODENAME}-${DATE}"
-          else
-            BASE_NAME="${CODENAME}-${DATE}"
-          fi
+          BASE_NAME="${EXTRAVERSION:-$CODENAME}-${CODENAME}-${DATE}"
           echo "BASE_NAME=${BASE_NAME}" >> $GITHUB_ENV
           echo "RELEASE_TAG=build-${{ github.run_id }}" >> $GITHUB_ENV
 
@@ -804,19 +246,12 @@ jobs:
           rm -rf AnyKernel3/.git AnyKernel3/*.zip
           cp "$IMG_PATH" AnyKernel3/
           sed -i "s/device.name1=.*/device.name1=${CODENAME}/" AnyKernel3/anykernel.sh || true
-          AKS=AnyKernel3/anykernel.sh
-          # Default AnyKernel3 memakai partisi boot contoh (omap_hsmmc) -> "Unable to determine ... boot partition"
-          sed -i -E 's#^(BLOCK|block)=.*#\1=/dev/block/bootdevice/by-name/boot;#' "$AKS"
-          sed -i -E 's#^(IS_SLOT_DEVICE|is_slot_device)=.*#\1=0;#' "$AKS"
-          sed -i "s|^kernel.string=.*|kernel.string=${BASE_NAME}|" "$AKS"
-          for n in 2 3 4 5; do sed -i "s|^device.name${n}=.*|device.name${n}=|" "$AKS"; done
-          # boot lavender (system-as-root) tidak punya ramdisk: lewati unpack/repack ramdisk
-          # ("No ramdisk found to unpack. Aborting...")
-          sed -i -E 's#^dump_boot;#split_boot;#; s#^write_boot;#flash_boot;#' "$AKS"
-          echo "--- anykernel.sh (properti & partisi)"
-          grep -n -E "^(kernel.string|do\.|device\.name|BLOCK|block|IS_SLOT_DEVICE|is_slot_device|RAMDISK_COMPRESSION|ramdisk_compression|dump_boot|split_boot|write_boot|flash_boot)" "$AKS" || true
+          sed -i -E 's#^(BLOCK|block)=.*#\1=/dev/block/bootdevice/by-name/boot;#' AnyKernel3/anykernel.sh
+          sed -i -E 's#^(IS_SLOT_DEVICE|is_slot_device)=.*#\1=0;#' AnyKernel3/anykernel.sh
+          sed -i "s|^kernel.string=.*|kernel.string=${BASE_NAME}|" AnyKernel3/anykernel.sh
+          sed -i -E 's#^dump_boot;#split_boot;#; s#^write_boot;#flash_boot;#' AnyKernel3/anykernel.sh
           cd AnyKernel3
-          zip -r9 "../${BASE_NAME}.zip" . -x ".git*" -x "*.zip"
+          zip -r9 "../${BASE_NAME}.zip" . -x ".git*"
           cd ..
           echo "ZIP_PATH=$(pwd)/${BASE_NAME}.zip" >> $GITHUB_ENV
 
@@ -830,54 +265,25 @@ jobs:
       - name: "📤 Telegram: Kirim Hasil Build (.zip)"
         continue-on-error: true
         run: |
-          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-            echo "::warning::BOT_TOKEN/CHAT_ID kosong (secret belum dibuat atau namanya salah), lewati Telegram"
-            exit 0
-          fi
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
-            -F chat_id="${CHAT_ID}" \
-            -F document=@"${ZIP_PATH}" \
-            -F caption="✅ Build Berhasil: ${BASE_NAME}"
-          echo
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then exit 0; fi
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"${ZIP_PATH}" -F caption="✅ Build Berhasil: ${BASE_NAME} - Full LTO MamboSU"
 
-      - name: 🔎 Diagnosa memori (OOM?)
+      - name: "📤 Telegram: Kirim Log saat Gagal (FIXED ANTI-LIMIT)"
         if: failure()
         continue-on-error: true
         run: |
-          free -h || true
-          swapon --show || true
-          df -h / /mnt || true
-          sudo dmesg 2>/dev/null | grep -i -E "out of memory|oom-kill|killed process" | tail -n 5 || true
-
-      - name: "📤 Telegram: Kirim Log saat Gagal"
-        if: failure()
-        continue-on-error: true
-        run: |
-          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-            echo "::warning::BOT_TOKEN/CHAT_ID kosong (secret belum dibuat atau namanya salah), log tidak dikirim"
-            exit 0
-          fi
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then exit 0; fi
           LOG="kernel/build.log"
           if [ ! -f "$LOG" ]; then
-            echo "build.log tidak ada (gagal sebelum tahap build), kirim pesan teks saja"
-            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-              -d chat_id="${CHAT_ID}" \
-              -d text="❌ Build Gagal pada ${CODENAME} sebelum tahap build. Cek tab Actions."
-            echo
+            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" -d chat_id="${CHAT_ID}" -d text="❌ Build Gagal ${CODENAME} sebelum compile"
             exit 0
           fi
-
-          grep -nE "error:|\*\*\* |Error [0-9]+$" "$LOG" | head -n 80 > errors.txt || true
-          [ -s errors.txt ] || tail -n 100 "$LOG" > errors.txt
-          gzip -9 -c "$LOG" > build-log.gz
-
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
-            -F chat_id="${CHAT_ID}" \
-            -F document=@"errors.txt" \
-            -F caption="❌ Build Gagal pada ${CODENAME}. Ringkasan error."
-          echo
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
-            -F chat_id="${CHAT_ID}" \
-            -F document=@"build-log.gz" \
-            -F caption="Log lengkap (gzip)"
-          echo
+          echo "=== ERROR SUMMARY ===" > errors.txt
+          grep -nE "error:|fatal error|undefined reference|ld.lld: error|make.*Error" "$LOG" | tail -n 120 >> errors.txt || true
+          echo -e "\n=== LAST 100 LINES ===" >> errors.txt
+          tail -n 100 "$LOG" >> errors.txt
+          tail -c 40000000 "$LOG" > build-log-trimmed.log
+          gzip -9 -c build-log-trimmed.log > build-log.gz
+          ls -lh errors.txt build-log.gz
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"errors.txt" -F caption="❌ ${CODENAME} Full LTO Gagal - Error"
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" -F chat_id="${CHAT_ID}" -F document=@"build-log.gz" -F caption="Log lengkap trimmed 40MB"
