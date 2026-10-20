@@ -1,10 +1,10 @@
-name: Manual Build Kernel - NM PROJECT (lavender 4.4)
+name: Manual Build Kernel - BTX (lavender 4.19)
 
 on:
   workflow_dispatch:
     inputs:
       KERNEL_SOURCE:
-        description: "URL repo kernel source (4.4 lavender)"
+        description: "URL repo kernel source (4.19 lavender)"
         required: true
         type: string
       KERNEL_BRANCH:
@@ -26,17 +26,18 @@ on:
         type: string
         default: ""
       XXKSU:
-        description: "Aktifkan KernelSU (varian dipilih di KSU_VARIANT) lewat defconfig"
+        description: "Aktifkan KernelSU (varian dipilih di KSU_VARIANT). Default mati = build kernel polos tanpa KSU"
         required: true
         type: boolean
-        default: true
+        default: false
       KSU_VARIANT:
-        description: "Varian KSU: sukisu = SukiSU-Ultra branch builtin (Magic Mount bawaan manager, hook manual otomatis); xxksu = backslashxx"
+        description: "Varian KSU: sukisu = SukiSU-Ultra branch builtin (Magic Mount bawaan manager, hook manual otomatis); xxksu = backslashxx; finasu = LyraVoid/FinaSU (EKSPERIMENTAL, builtin, hook otomatis via tracepoint+kprobes, tanpa patch hook source)"
         required: true
         type: choice
         options:
           - sukisu
           - xxksu
+          - finasu
         default: sukisu
       SUKISU_SOURCE:
         description: "Khusus sukisu: non-gki-port = xiziya/SukiSU_Non-GKI (builtin + compat kernel <5.10); official-builtin = SukiSU-Ultra resmi (hanya jalan di kernel 5.10+)"
@@ -54,11 +55,6 @@ on:
           - syscall
           - manual
         default: syscall
-      ANTI_FLICKER:
-        description: "Patch anti kedip LCD (ESD check off, LPM off, KCAL on, idle_pc off)"
-        required: true
-        type: boolean
-        default: true
       LTO_MODE:
         description: "Mode LTO (full/thin hanya jalan kalau source punya CONFIG_LTO_CLANG; kalau tidak, diabaikan)"
         required: true
@@ -68,6 +64,11 @@ on:
           - thin
           - full
         default: thin
+      CLANG_REV:
+        description: "Revisi AOSP clang (folder di platform/prebuilts/clang/host/linux-x86, mis: clang-r596125 = clang 22)"
+        required: true
+        type: string
+        default: "clang-r596125"
       CODENAME:
         description: "Codename device"
         required: true
@@ -96,8 +97,8 @@ jobs:
       KSU_VARIANT: ${{ github.event.inputs.KSU_VARIANT }}
       SUKISU_SOURCE: ${{ github.event.inputs.SUKISU_SOURCE }}
       KSU_HOOK_MODE: ${{ github.event.inputs.KSU_HOOK_MODE }}
-      ANTI_FLICKER: ${{ github.event.inputs.ANTI_FLICKER }}
       LTO_MODE: ${{ github.event.inputs.LTO_MODE }}
+      CLANG_REV: ${{ github.event.inputs.CLANG_REV }}
       CODENAME: ${{ github.event.inputs.CODENAME }}
       EXTRAVERSION: ${{ github.event.inputs.EXTRAVERSION }}
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -124,7 +125,7 @@ jobs:
             "Versi  : ${KERNEL_VERSION:-asli}" \
             "KSU    : ${XXKSU} (${KSU_VARIANT})" \
             "LTO    : ${LTO_MODE}" \
-            "AntiKedip : ${ANTI_FLICKER}" \
+            "Clang  : ${CLANG_REV}" \
             "Run    : ${RUN_URL}")
           curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             --data-urlencode chat_id="${CHAT_ID}" \
@@ -201,7 +202,7 @@ jobs:
           echo "KDIR=$(pwd)/kernel" >> $GITHUB_ENV
 
       # Opsi versi kernel: timpa VERSION/PATCHLEVEL/SUBLEVEL di Makefile utama (LINUX_VERSION_CODE ikut berubah).
-      # Hati-hati: seluruh kernel (bukan cuma KSU) ikut memilih jalur kode sesuai versi baru; 4.4 -> 5.x bisa memunculkan error API.
+      # Hati-hati: seluruh kernel (bukan cuma KSU) ikut memilih jalur kode sesuai versi baru.
       - name: 🧬 Versi kernel (opsional)
         if: ${{ github.event.inputs.KERNEL_VERSION != '' }}
         working-directory: kernel
@@ -221,15 +222,21 @@ jobs:
             exit 1
           fi
 
-      - name: 🛠️ Setup Clang (Proton-Clang) & GCC
+      # AOSP clang diambil sebagai tarball satu folder revisi saja (clone penuh repo prebuilts berukuran sangat besar).
+      # GCC 4.9 AOSP tetap dipakai untuk binutils (as) dan prefix CROSS_COMPILE.
+      - name: 🛠️ Setup AOSP Clang & GCC
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang toolchain/clang
+          mkdir -p toolchain/clang
+          curl -fL --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_REV}.tar.gz" \
+            | tar -xz -C toolchain/clang
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 toolchain/gcc64
           git clone --depth=1 -b android-9.0.0_r1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 toolchain/gcc32
 
           echo "$(pwd)/toolchain/clang/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc64/bin" >> $GITHUB_PATH
           echo "$(pwd)/toolchain/gcc32/bin" >> $GITHUB_PATH
+
+          toolchain/clang/bin/clang --version
 
       - name: 📋 Cek defconfig & fragment
         working-directory: kernel
@@ -281,11 +288,38 @@ jobs:
           echo "--- Kconfig SukiSU (builtin)"
           grep -n -E "^config |depends on" drivers/kernelsu/Kconfig | head -n 40 || true
 
+      # Integrasi FinaSU (LyraVoid/FinaSU) sebagai driver builtin, meniru cara setup.sh KernelSU:
+      # symlink kernel/ repo ke drivers/kernelsu + daftar di drivers/Makefile & drivers/Kconfig.
+      # FinaSU tidak butuh patch hook di source: hook lewat tracepoint sys_enter + kretprobe (butuh KPROBES, KRETPROBES,
+      # HAVE_SYSCALL_TRACEPOINTS, EXT4_FS). Repo ini ditulis untuk kernel yang lebih baru (GKI 5.10+), jadi kompatibilitas
+      # 4.19 BELUM terbukti: kalau gagal compile, lihat log error di Telegram.
+      - name: 📥 Integrasi FinaSU (builtin, eksperimental)
+        if: ${{ github.event.inputs.XXKSU == 'true' && github.event.inputs.KSU_VARIANT == 'finasu' }}
+        working-directory: kernel
+        run: |
+          git clone --depth=1 https://github.com/LyraVoid/FinaSU FinaSU
+          echo "FinaSU commit: $(git -C FinaSU rev-parse --short HEAD)"
+          for f in FinaSU/kernel/Kbuild FinaSU/kernel/Kconfig; do
+            if [ -f "$f" ]; then echo "ok    $f"; else echo "::error::$f tidak ada (struktur repo FinaSU berubah)"; exit 1; fi
+          done
+          ln -sfn ../FinaSU/kernel drivers/kernelsu
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          echo "--- hasil integrasi"
+          ls -la drivers/ | grep -i kernelsu || true
+          tail -n 3 drivers/Kconfig
+          grep -n kernelsu drivers/Makefile
+          echo "--- Kconfig FinaSU"
+          grep -n -E "^config |depends on|default" drivers/kernelsu/Kconfig | head -n 40 || true
+          echo "--- cek dukungan kernel untuk hook FinaSU"
+          grep -n -E "config HAVE_SYSCALL_TRACEPOINTS|config HAVE_KRETPROBES" arch/arm64/Kconfig arch/Kconfig || true
+          grep -rn "register_trace_prio_sys_enter\|tracepoint_probe_register_prio" include/ kernel/tracepoint.c 2>/dev/null | head -n 3 || echo "::warning::API tracepoint prio tidak terlihat di source ini"
+
       # Pasang hook syscall manual KSU otomatis (scope-minimized, dari backslashxx/KernelSU issue #5).
       # Tiap hook hanya dipasang kalau handler-nya ada di driver KSU dan pola kodenya cocok.
-      # xxksu: hanya mode manual. sukisu (builtin): selalu jalan. Handler beda nama ditangani via KSU_VARIANT.
+      # xxksu: hanya mode manual. sukisu (builtin): selalu jalan. finasu: tidak pakai hook manual (lihat step integrasi).
       - name: 🪝 Pasang hook manual KSU otomatis
-        if: ${{ github.event.inputs.XXKSU == 'true' && (github.event.inputs.KSU_VARIANT == 'sukisu' || github.event.inputs.KSU_HOOK_MODE == 'manual') }}
+        if: ${{ github.event.inputs.XXKSU == 'true' && (github.event.inputs.KSU_VARIANT == 'sukisu' || (github.event.inputs.KSU_VARIANT == 'xxksu' && github.event.inputs.KSU_HOOK_MODE == 'manual')) }}
         working-directory: kernel
         run: |
           cat > /tmp/ksu_hooks.py << 'PYEOF'
@@ -577,8 +611,13 @@ jobs:
           CFG="arch/arm64/configs/$KERNEL_CONFIG"
           scripts/config --file "$CFG" --enable CONFIG_KSU
 
-          if [ "$KSU_VARIANT" = "sukisu" ]; then
-            # SUSFS butuh patch kernel terpisah + THREAD_INFO_IN_TASK (tidak ada di 4.4), KPM butuh set_memory.h 4.19
+          if [ "$KSU_VARIANT" = "finasu" ]; then
+            # FinaSU: KSU depends on KPROBES && EXT4_FS; KPROBES depends on MODULES; hook via kretprobe + tracepoint sys_enter
+            for s in MODULES KPROBES KRETPROBES EXT4_FS; do
+              scripts/config --file "$CFG" --enable CONFIG_${s}
+            done
+          elif [ "$KSU_VARIANT" = "sukisu" ]; then
+            # SUSFS butuh patch kernel terpisah, KPM tidak dipakai
             scripts/config --file "$CFG" --disable CONFIG_KSU_SUSFS
             scripts/config --file "$CFG" --disable CONFIG_KPM
           else
@@ -598,7 +637,7 @@ jobs:
           grep -n "CONFIG_KSU" "$CFG"
           [ -d drivers/kernelsu ] && echo "ok    driver KSU: drivers/kernelsu" || echo "::warning::folder driver KSU tidak ketemu, pastikan sudah ada di source"
 
-          if [ "$KSU_VARIANT" = "sukisu" ] || [ "$KSU_HOOK_MODE" = "manual" ]; then
+          if [ "$KSU_VARIANT" = "sukisu" ] || { [ "$KSU_VARIANT" = "xxksu" ] && [ "$KSU_HOOK_MODE" = "manual" ]; }; then
             echo "--- cek hook manual di source"
             miss=0
             chk() {  # file pola
@@ -626,62 +665,6 @@ jobs:
           fi
           exit 0
 
-      # Racikan anti kedip LCD (panel KW/gantian di SDM660):
-      # ESD/status check off, LPM off, KCAL on, idle power collapse off.
-      - name: 🖥️ Patch anti kedip LCD
-        if: ${{ github.event.inputs.ANTI_FLICKER == 'true' }}
-        working-directory: kernel
-        run: |
-          CFG="arch/arm64/configs/$KERNEL_CONFIG"
-
-          echo "--- defconfig sebelum"
-          grep -n -E "MDSS_DSI_CTRL_STATUS|MDSS_LPM|MDSS_KCAL" "$CFG" || echo "(tidak ada)"
-          scripts/config --file "$CFG" --disable CONFIG_FB_MSM_MDSS_DSI_CTRL_STATUS
-          scripts/config --file "$CFG" --disable CONFIG_FB_MSM_MDSS_LPM_ENABLE
-          scripts/config --file "$CFG" --enable  CONFIG_FB_MSM_MDSS_KCAL_CTRL
-          echo "--- defconfig sesudah"
-          grep -n -E "MDSS_DSI_CTRL_STATUS|MDSS_LPM|MDSS_KCAL" "$CFG"
-
-          echo "--- DTSI panel: matikan lpm / idle-pc / ulps"
-          PANELS=$(find arch/arm64/boot/dts -name 'dsi-panel-*.dtsi' -o -name '*lavender*.dts*' | sort)
-          for f in $PANELS; do
-            if grep -q -E "qcom,mdss-dsi-(pan-enable-lpm|idle-pc-enabled|ulps-enabled)" "$f"; then
-              echo ">> $f"
-              grep -n -E "qcom,mdss-dsi-(pan-enable-lpm|idle-pc-enabled|ulps-enabled)" "$f"
-              # bentuk integer: <1> -> <0>
-              sed -i -E 's/^([[:space:]]*qcom,mdss-dsi-(pan-enable-lpm|idle-pc-enabled|ulps-enabled)[[:space:]]*=[[:space:]]*)<[1-9][0-9]*>;/\1<0>;/' "$f"
-              # bentuk boolean (tanpa nilai): di-komen supaya off
-              sed -i -E 's|^([[:space:]]*)(qcom,mdss-dsi-(pan-enable-lpm\|idle-pc-enabled\|ulps-enabled));|\1/* \2; (anti-kedip) */|' "$f"
-              echo "   sesudah:"
-              grep -n -E "qcom,mdss-dsi-(pan-enable-lpm|idle-pc-enabled|ulps-enabled)" "$f" || echo "   (sudah tidak ada)"
-            fi
-          done
-
-          echo "--- mdss_mdp.c: idle_pc_enabled = false"
-          MDP="drivers/video/fbdev/msm/mdss_mdp.c"
-          if [ -f "$MDP" ]; then
-            grep -n "idle_pc_enabled" "$MDP" || true
-            sed -i -E 's/(idle_pc_enabled[[:space:]]*=)[[:space:]]*[^=;][^;]*;/\1 false;/' "$MDP"
-            echo "   sesudah:"
-            grep -n "idle_pc_enabled" "$MDP" || true
-          else
-            echo "::warning::$MDP tidak ditemukan, lewati"
-          fi
-
-      - name: 🩹 Fix build 4.4 (dtc yylloc, gcc modern)
-        working-directory: kernel
-        run: |
-          # GCC 10+ default -fno-common -> "multiple definition of yylloc" di scripts/dtc
-          for f in scripts/dtc/dtc-lexer.lex.c_shipped scripts/dtc/dtc-lexer.l scripts/dtc/dtc-parser.tab.c_shipped; do
-            [ -f "$f" ] || continue
-            grep -n "yylloc" "$f" | head -n 5 || true
-            sed -i -E 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f"
-          done
-          echo "--- sesudah"
-          grep -n "YYLTYPE yylloc" scripts/dtc/*.c_shipped scripts/dtc/*.l 2>/dev/null || true
-          # hapus file hasil generate lama kalau ada
-          rm -f scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.tab.c scripts/dtc/dtc-parser.tab.h 2>/dev/null || true
-
       - name: 🔨 Build Kernel
         working-directory: kernel
         run: |
@@ -689,61 +672,7 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # ThinLTO + lld baru menolak opsi import-instr-limit yang dobel; pakai pembungkus yang membuang duplikatnya
-          # Tanpa LTO pakai GNU ld dari GCC 4.9: lld baru gagal untuk built-in.o kosong
-          # ("ld.lld: error: target emulation unknown: -m or at least one .o file required")
-          # lld hanya dipakai kalau LTO diminta DAN source mendukung LTO_CLANG.
-          # Source tanpa LTO + lld gagal link vmlinux ("can't create dynamic relocation R_AARCH64_ABS64 ... -z notext").
-          LTO_SUPPORTED=0
-          grep -q "LTO_CLANG" init/Kconfig arch/arm64/Kconfig 2>/dev/null && LTO_SUPPORTED=1
-          USE_LLD=0
-          if { [ "$LTO_MODE" = "full" ] || [ "$LTO_MODE" = "thin" ]; } && [ "$LTO_SUPPORTED" = 1 ]; then
-            USE_LLD=1
-          fi
-          if [ "$USE_LLD" = 0 ] && command -v aarch64-linux-android-ld >/dev/null; then
-            LD_BIN=aarch64-linux-android-ld
-          else
-            LD_BIN=ld.lld
-          fi
-          echo "LTO_MODE=$LTO_MODE, source support LTO_CLANG=$LTO_SUPPORTED, LD yang dipakai: $LD_BIN"
-          if [ "$LD_BIN" = "ld.lld" ]; then
-            cat > /tmp/ld-dedup.sh << 'LD_EOF'
-          #!/bin/bash
-          seen=0
-          args=()
-          while [ $# -gt 0 ]; do
-            if [ "$1" = "-mllvm" ] && [ $# -ge 2 ] && [[ "$2" == *import-instr-limit=* ]]; then
-              if [ $seen -eq 0 ]; then args+=("$1" "$2"); seen=1; fi
-              shift 2
-              continue
-            fi
-            if [[ "$1" == *import-instr-limit=* ]]; then
-              if [ $seen -eq 0 ]; then args+=("$1"); seen=1; fi
-              shift
-              continue
-            fi
-            args+=("$1")
-            shift
-          done
-          # lld menolak "ld -r" tanpa input kalau tidak ada emulation (-m)
-          hasm=0
-          for a in "${args[@]}"; do
-            case "$a" in -m|-maarch64*|-marm*|-melf*) hasm=1 ;; esac
-          done
-          [ $hasm -eq 0 ] && args=(-m aarch64linux "${args[@]}")
-          # kernel PIE/KASLR: izinkan text relocation supaya lld tidak menolak link vmlinux
-          args+=(-z notext)
-          exec ld.lld "${args[@]}"
-          LD_EOF
-            chmod +x /tmp/ld-dedup.sh
-            LD_BIN=/tmp/ld-dedup.sh
-          fi
-
-          # Clang baru + -Werror di qcacld-3.0: cast void* ke enum jadi error
-          # -fno-builtin-stpcpy: clang baru mengubah sprintf jadi stpcpy, kernel 4.4 tidak punya ("undefined reference to stpcpy")
-          export KCFLAGS="-Wno-void-pointer-to-enum-cast -fno-builtin-stpcpy"
-
-          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=${LD_BIN} AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
+          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip"
 
           make $ARGS "$KERNEL_CONFIG" $CONFIG_FRAGMENTS 2>&1 | tee build.log
 
@@ -773,15 +702,13 @@ jobs:
             echo "Source ini tidak punya LTO_CLANG, mode LTO diabaikan"
           fi
 
-          # Pastikan racikan anti kedip tidak ditimpa olddefconfig / dependensi
-          if [ "$ANTI_FLICKER" = "true" ]; then
-            scripts/config --file out/.config --disable CONFIG_FB_MSM_MDSS_DSI_CTRL_STATUS
-            scripts/config --file out/.config --disable CONFIG_FB_MSM_MDSS_LPM_ENABLE
-            scripts/config --file out/.config --enable  CONFIG_FB_MSM_MDSS_KCAL_CTRL
-          fi
           if [ "$XXKSU" = "true" ]; then
             scripts/config --file out/.config --enable CONFIG_KSU
-            if [ "$KSU_VARIANT" = "sukisu" ]; then
+            if [ "$KSU_VARIANT" = "finasu" ]; then
+              for s in MODULES KPROBES KRETPROBES EXT4_FS; do
+                scripts/config --file out/.config --enable CONFIG_${s}
+              done
+            elif [ "$KSU_VARIANT" = "sukisu" ]; then
               scripts/config --file out/.config --disable CONFIG_KSU_SUSFS
               scripts/config --file out/.config --disable CONFIG_KPM
             else
@@ -797,7 +724,8 @@ jobs:
             echo "--- CONFIG_KSU* di out/.config"
             grep -n "CONFIG_KSU" out/.config || true
             KSU_SYMS="KSU"
-            if [ "$KSU_VARIANT" != "sukisu" ] && [ "$KSU_HOOK_MODE" = "syscall" ]; then KSU_SYMS="KSU KSU_TAMPER_SYSCALL_TABLE"; fi
+            if [ "$KSU_VARIANT" = "xxksu" ] && [ "$KSU_HOOK_MODE" = "syscall" ]; then KSU_SYMS="KSU KSU_TAMPER_SYSCALL_TABLE"; fi
+            if [ "$KSU_VARIANT" = "finasu" ]; then KSU_SYMS="KSU KPROBES KRETPROBES HAVE_SYSCALL_TRACEPOINTS"; fi
             for sym in $KSU_SYMS; do
               grep -q "^CONFIG_${sym}=y" out/.config || {
                 echo "::error::CONFIG_${sym} tidak aktif (dependensi Kconfig belum terpenuhi / simbol tidak ada)" | tee -a build.log
@@ -806,7 +734,12 @@ jobs:
                 exit 1
               }
             done
-            if [ "$KSU_VARIANT" = "sukisu" ]; then
+            if [ "$KSU_VARIANT" = "finasu" ]; then
+              # FinaSU: SELinux dipakai untuk policy, ext4 untuk dependensi KSU
+              for s in SECURITY SECURITY_SELINUX EXT4_FS; do
+                grep -q "^CONFIG_${s}=y" out/.config || echo "::warning::CONFIG_${s} tidak =y di out/.config (dibutuhkan FinaSU)"
+              done
+            elif [ "$KSU_VARIANT" = "sukisu" ]; then
               # SukiSU builtin: setuid/umount lewat LSM, nuke_ext4_sysfs butuh ext4
               for s in SECURITY SECURITY_SELINUX EXT4_FS; do
                 grep -q "^CONFIG_${s}=y" out/.config || echo "::warning::CONFIG_${s} tidak =y di out/.config (dibutuhkan SukiSU)"
@@ -825,14 +758,6 @@ jobs:
             else
               echo "::warning::LTO_CLANG TIDAK aktif: source tidak mendukung LTO, build jalan tanpa LTO"
             fi
-          fi
-
-          echo "--- Cek LCD config di out/.config"
-          grep -n -E "MDSS_DSI_CTRL_STATUS|MDSS_LPM|MDSS_KCAL" out/.config || true
-          if [ "$ANTI_FLICKER" = "true" ]; then
-            grep -q "^CONFIG_FB_MSM_MDSS_DSI_CTRL_STATUS=y" out/.config && echo "::warning::DSI_CTRL_STATUS masih aktif (ke-select dependensi lain)"
-            grep -q "^CONFIG_FB_MSM_MDSS_LPM_ENABLE=y" out/.config && echo "::warning::LPM_ENABLE masih aktif (ke-select dependensi lain)"
-            grep -q "^CONFIG_FB_MSM_MDSS_KCAL_CTRL=y" out/.config || echo "::warning::KCAL_CTRL tidak aktif (source tidak punya driver KCAL?)"
           fi
 
           set +e
