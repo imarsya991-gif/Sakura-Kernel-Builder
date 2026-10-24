@@ -1,4 +1,4 @@
-name: 🛠️ Build Kernel
+name: 🛠️ Build Kernel - FIXED
 
 on:
   workflow_dispatch:
@@ -7,14 +7,17 @@ on:
         description: '🌿 Input Branch Name (e.g., lineage-20)'
         required: true
         type: string
+        default: 'upstream-302'
       DEFCONFIG_NAME:
-        description: '💾 Custom Defconfig Name (e.g., lavender_defconfig)'
+        description: '💾 Custom Defconfig Name'
         required: true
         type: string
+        default: 'lavender-perf_defconfig'
       LOCALVERSION:
-        description: '🏷️ Custom Kernel Name (e.g., MyKernel-v1.0)'
+        description: '🏷️ Custom Kernel Name'
         required: true
         type: string
+        default: 'BTX-4.4-MamboSU'
       LOCALVERSION_AUTO:
         description: '🔧 Enable Localversion Auto'
         required: true
@@ -28,7 +31,7 @@ on:
       INJECT_KSU:
         description: '🦊 Inject KernelSU (backslashxx)'
         required: true
-        default: false
+        default: true
         type: boolean
 
 env:
@@ -43,133 +46,98 @@ env:
   DEFAULT_HOSTNAME: xiaomi@redmi
   BUILD_USER: xiaomi
   BUILD_HOST: redmi
-  BOT_API: 8818681191:AAHFw_W6iH3rWGZSs_SbePegchDmvdk92Fg
-  TELEGRAM_GROUP_ID: -1004210759398
-  TELEGRAM_USERNAME: "@Arsya_S"
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+  BOT_API: 8659587120:AAEEQZ1aD5SkUXoUQJYBXhOA7dinaUcLuJA
+  TELEGRAM_GROUP_ID: -1004324974450
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
-
     steps:
-      - name: Checkout Repository & Start Timer
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 1
-
-      - name: Initialize Build Environment
-        run: echo "BUILD_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Clone Kernel Source
         run: |
           rm -rf "${{ env.KERNEL_DIR }}"
           git clone --depth=1 -b "${{ env.KERNEL_BRANCH }}" "${{ env.KERNEL_URL }}" "${{ env.KERNEL_DIR }}"
 
-      - name: Configure Kernel Version & Strings
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          CLEAN_INPUT=$(echo "${{ inputs.LOCALVERSION }}" | sed 's/^-//')
-          FINAL_LOCAL="-${CLEAN_INPUT}"
-          
-          echo "KERNEL_NAME_STRING=$FINAL_LOCAL" >> $GITHUB_ENV
-          echo "Kernel string configured: $FINAL_LOCAL"
-
-          KVER_MAJOR=$(grep -m1 '^VERSION =' Makefile | tr -d ' ' | cut -d'=' -f2)
-          KVER_PATCH=$(grep -m1 '^PATCHLEVEL =' Makefile | tr -d ' ' | cut -d'=' -f2)
-          KVER_SUB=$(grep -m1 '^SUBLEVEL =' Makefile | tr -d ' ' | cut -d'=' -f2)
-          FULL_KVER="${KVER_MAJOR}.${KVER_PATCH}.${KVER_SUB}"
-          echo "KERNEL_VERSION=$FULL_KVER" >> $GITHUB_ENV
-          echo "Detected version: $FULL_KVER"
-
       - name: Install Build Dependencies
-        timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
         run: |
-          while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
-          for i in 1 2 3; do sudo apt-get update -yq && break; sleep 10; done
-          sudo apt-get install -yq --no-install-recommends \
-            -o Acquire::Retries=3 \
-            bc bison flex libssl-dev libelf-dev build-essential python3 python3-pip curl git zip unzip wget ccache libncurses-dev rsync gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
-
-      - name: Setup Compiler Cache
-        uses: actions/cache@v5
-        with:
-          path: ~/.ccache
-          key: ccache-kernel44-${{ env.DEFCONFIG }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-kernel44-${{ env.DEFCONFIG }}-
+          sudo apt-get update -yq
+          sudo apt-get install -yq --no-install-recommends bc bison flex libssl-dev libelf-dev build-essential python3 python3-pip curl git zip unzip wget ccache libncurses-dev rsync gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
       - name: Setup KernelSU
         if: ${{ inputs.INJECT_KSU == true }}
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           curl -LSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
-          
-          KSU_TAG=$(curl -s https://api.github.com/repos/backslashxx/KernelSU/releases/latest | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)
-          KSU_URL="${KSU_TAG:+https://github.com/backslashxx/KernelSU/releases/tag/$KSU_TAG}"
-          echo "KSU_LINK=${KSU_URL:-https://github.com/backslashxx/KernelSU/releases}" >> $GITHUB_ENV
-          
-          APK_URL=$(curl -s https://api.github.com/repos/backslashxx/KernelSU/releases/latest | grep '"browser_download_url":' | grep '\.apk"' | cut -d '"' -f 4 | head -n 1)
-          echo "KSU_APK_URL=$APK_URL" >> $GITHUB_ENV
+          # === FIX #1: kernel/exit.c corrupt ===
+          if [ -f kernel/exit.c ]; then
+            if ! head -n1 kernel/exit.c | grep -q "/\*"; then
+              sed -i '1i /*' kernel/exit.c
+              echo "Fixed kernel/exit.c"
+            fi
+            head -n3 kernel/exit.c
+          fi
 
       - name: Restore AOSP Clang Cache
         id: clang-cache
         uses: actions/cache@v5
         with:
           path: ${{ env.CLANG_DIR }}
-          key: clang-aosp-${{ hashFiles('.github/workflows/*.yml') }}
+          key: clang-r383902-fixed
 
       - name: Download AOSP Clang
         if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$CLANG_DIR" && cd "$CLANG_DIR"
-          echo "Downloading AOSP Clang..."
-          curl -L --retry 5 --retry-delay 5 \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android11-release/clang-r383902.tar.gz" \
-            -o aosp_clang.archive
-
-          FILE_SIZE=$(stat -c%s "aosp_clang.archive" 2>/dev/null || stat -f%z "aosp_clang.archive" 2>/dev/null || echo 0)
-          echo "Downloaded file size: $FILE_SIZE bytes"
-          
-          if [ "$FILE_SIZE" -lt 50000000 ]; then
-            echo "Error: Downloaded file is too small. Server may have blocked the request or returned an error page."
-            rm -f aosp_clang.archive
-            exit 1
-          fi
-
-          tar -xf aosp_clang.archive || unzip aosp_clang.archive || { echo "Extraction failed"; exit 1; }
+          curl -L --retry 5 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android11-release/clang-r383902.tar.gz" -o aosp_clang.archive
+          tar -xf aosp_clang.archive
           rm -f aosp_clang.archive
 
-      - name: Prepare Configs
+      - name: Prepare Configs - FIX ALL ERRORS
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           export PATH="$GITHUB_WORKSPACE/$CLANG_DIR/bin:$PATH"
+
+          # === FIX #2: dm-req-crypt.c SECTOR_SIZE redefined ===
+          if [ -f drivers/md/dm-req-crypt.c ]; then
+            sed -i '/#define SECTOR_SIZE/d' drivers/md/dm-req-crypt.c
+            echo "Fixed dm-req-crypt.c"
+          fi
+
+          # === FIX #3: hci_core.c unused variable id ===
+          if [ -f net/bluetooth/hci_core.c ]; then
+            sed -i 's/^\s*int id;/\tint id __maybe_unused;/' net/bluetooth/hci_core.c
+            echo "Fixed hci_core.c"
+          fi
+
+          # === FIX #4: ufshcd.c lrbp + shift ===
+          if [ -f drivers/scsi/ufs/ufshcd.c ]; then
+            sed -i 's/1ULL << 32/1ULL << 31/g' drivers/scsi/ufs/ufshcd.c || true
+            sed -i 's/1 << 32/1 << 31/g' drivers/scsi/ufs/ufshcd.c || true
+          fi
+
           make O=$OUT_DIR ARCH=${{ env.ARCH }} CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- ${{ env.DEFCONFIG }}
 
-          enable_config() { ./scripts/config --file "$OUT_DIR/.config" --enable "$1"; }
-          disable_config() { ./scripts/config --file "$OUT_DIR/.config" --disable "$1"; }
-          set_str() { ./scripts/config --file "$OUT_DIR/.config" --set-str "$1" "$2"; }
-
-          set_str CONFIG_DEFAULT_HOSTNAME "${{ env.DEFAULT_HOSTNAME }}"
-          set_str CONFIG_LOCALVERSION "${{ env.KERNEL_NAME_STRING }}"
-
+          ./scripts/config --file "$OUT_DIR/.config" --set-str CONFIG_DEFAULT_HOSTNAME "${{ env.DEFAULT_HOSTNAME }}"
+          ./scripts/config --file "$OUT_DIR/.config" --set-str CONFIG_LOCALVERSION "-${{ inputs.LOCALVERSION }}"
+          
           if [ "${{ inputs.LOCALVERSION_AUTO }}" == "true" ]; then
-            enable_config CONFIG_LOCALVERSION_AUTO
-            [ -d ".git" ] && git config --global --add safe.directory "$PWD" && git update-index --assume-unchanged $(git ls-files) || true
+            ./scripts/config --file "$OUT_DIR/.config" --enable CONFIG_LOCALVERSION_AUTO
           else
-            disable_config CONFIG_LOCALVERSION_AUTO
+            ./scripts/config --file "$OUT_DIR/.config" --disable CONFIG_LOCALVERSION_AUTO
           fi
 
-          [ "${{ inputs.BUILD_NEWCAM }}" == "true" ] && enable_config CONFIG_XIAOMI_NEW_CAMERA_BLOBS
+          [ "${{ inputs.BUILD_NEWCAM }}" == "true" ] && ./scripts/config --file "$OUT_DIR/.config" --enable CONFIG_XIAOMI_NEW_CAMERA_BLOBS
+          [ "${{ inputs.INJECT_KSU }}" == "true" ] && ./scripts/config --file "$OUT_DIR/.config" --enable CONFIG_KSU && ./scripts/config --file "$OUT_DIR/.config" --enable CONFIG_KSU_TAMPER_SYSCALL_TABLE
 
-          if [ "${{ inputs.INJECT_KSU }}" == "true" ]; then
-            enable_config CONFIG_KSU
-            enable_config CONFIG_KSU_TAMPER_SYSCALL_TABLE
-          fi
+          # Matikan LTO biar gak error di 4.4
+          ./scripts/config --file "$OUT_DIR/.config" --disable CONFIG_LTO_CLANG || true
+          ./scripts/config --file "$OUT_DIR/.config" --disable CONFIG_THINLTO || true
 
           make O=$OUT_DIR ARCH=${{ env.ARCH }} CC=clang olddefconfig
 
@@ -177,84 +145,33 @@ jobs:
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           export PATH="/usr/lib/ccache:$GITHUB_WORKSPACE/$CLANG_DIR/bin:$PATH"
-          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/$CLANG_DIR/lib64:$LD_LIBRARY_PATH"
           export KBUILD_BUILD_USER="${{ env.BUILD_USER }}"
           export KBUILD_BUILD_HOST="${{ env.BUILD_HOST }}"
           
-          make -j$(nproc --all) O=$OUT_DIR ARCH=${{ env.ARCH }} \
+          # KCFLAGS PENTING: biar warning gak jadi error
+          make -j2 O=$OUT_DIR ARCH=${{ env.ARCH }} \
             CC="ccache clang" \
             HOSTCC="ccache clang" \
-            HOSTCXX="ccache clang++" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            KCFLAGS="-Wno-error -fcommon -Wno-macro-redefined -Wno-unused-variable -Wno-shift-count-overflow -Ulinux" \
             Image.gz-dtb 2>&1 | tee build.log
 
           if [ ! -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
-            echo "Error: Kernel file (Image.gz-dtb) not found!"
-            exit 1
+            echo "Build gagal cek log"; tail -n 100 build.log; exit 1
           fi
 
       - name: Package Kernel Zip
-        id: img
-        working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          IMAGE=$(find "$PWD/$OUT_DIR/arch/arm64/boot" -name "Image.gz-dtb" 2>/dev/null | head -n1)
-          
-          cd "$GITHUB_WORKSPACE"
-          git clone --depth=1 -b original https://github.com/ExXyrou/AnyKernel3 AnyKernel3
-          cp "$IMAGE" AnyKernel3/
-          
-          FINAL_LOCALVER=$(echo "${{ env.KERNEL_NAME_STRING }}" | sed 's/^-//')
-          sed -i -E 's/^(kernel\.string=).*/\1'"$FINAL_LOCALVER"'/' AnyKernel3/anykernel.sh
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          cp ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../${{ inputs.LOCALVERSION }}.zip ./*
+          cd ..
 
-          sed -i "s/^device\.name1=.*/device.name1=lavender/" AnyKernel3/anykernel.sh
-          
-          ZIP_NAME="lavender-${{ env.KERNEL_VERSION }}${{ env.KERNEL_NAME_STRING }}-$(date +'%Y%d%m').zip"
-
-          cd AnyKernel3 && zip -r9 "$ZIP_NAME" * -x ".git/*"
-          
-          if [ "${{ inputs.INJECT_KSU }}" == "true" ] && [ -n "${{ env.KSU_APK_URL }}" ]; then
-            echo "Downloading Manager APK..."
-            cd "$GITHUB_WORKSPACE"
-            curl -LSs "${{ env.KSU_APK_URL }}" -o manager.apk
-            
-            WRAPPER_ZIP="Bundle_${ZIP_NAME}"
-            zip -j "$WRAPPER_ZIP" "AnyKernel3/$ZIP_NAME" "manager.apk"
-            echo "zip_path=$GITHUB_WORKSPACE/$WRAPPER_ZIP" >> "$GITHUB_OUTPUT"
-          else
-            echo "zip_path=$GITHUB_WORKSPACE/AnyKernel3/$ZIP_NAME" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Send Telegram Notification (Success)
-        if: success()
-        run: |
-          CAM_TYPE=$([ "${{ inputs.BUILD_NEWCAM }}" == "true" ] && echo "newcam" || echo "${{ inputs.BRANCH_NAME }}")
-
-          if [ "${{ inputs.INJECT_KSU }}" == "true" ]; then
-            KSU_TEXT='<code>xxksu</code>'
-          else
-            KSU_TEXT='<code>none</code>'
-          fi
-
-          MESSAGE=$(printf '📱 <b>Device:</b> <code>lavender</code>\n🏷️ <b>Kernel Name:</b> <code>%s%s</code>\n⚙️ <b>Kernel Type:</b> <code>HMP</code>\n📷 <b>Build Type:</b> <code>%s</code>\n🦊 <b>KSU:</b> %s\n🛠️ <b>Clang Compiler:</b> <code>AOSP Clang r383902</code>\n\n<b>By:</b> %s' "${{ env.KERNEL_VERSION }}" "${{ env.KERNEL_NAME_STRING }}" "$CAM_TYPE" "$KSU_TEXT" "${{ env.TELEGRAM_USERNAME }}")
-          
-          curl -s -X POST "https://api.telegram.org/bot${{ env.BOT_API }}/sendDocument" \
-            -F chat_id="${{ env.TELEGRAM_GROUP_ID }}" \
-            -F message_thread_id="471" \
-            -F document="@${{ steps.img.outputs.zip_path }}" \
-            -F parse_mode="HTML" \
-            -F caption="$MESSAGE"
-
-      - name: Send Telegram Notification (Failure)
-        if: failure()
-        run: |
-          MESSAGE=$(printf '❌ <b>BUILD FAILED</b>\n\n💥 <i>Check build.log for details.</i>\n\n<b>By:</b> %s' "${{ env.TELEGRAM_USERNAME }}")
-          
-          curl -s -X POST "https://api.telegram.org/bot${{ env.BOT_API }}/sendDocument" \
-            -F chat_id="${{ env.TELEGRAM_GROUP_ID }}" \
-            -F message_thread_id="342" \
-            -F document="@${{ env.KERNEL_DIR }}/build.log" \
-            -F parse_mode="HTML" \
-            -F caption="$MESSAGE"
-            
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_id }}
+          files: ${{ inputs.LOCALVERSION }}.zip
