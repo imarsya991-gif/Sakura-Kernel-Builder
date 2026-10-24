@@ -21,10 +21,6 @@ on:
         type: choice
         options: [xxksu, ksu-next, none]
         default: 'xxksu'
-      CLANG_SOURCE:
-        description: 'AOSP Clang (aosp r416183b1/proton)'
-        required: true
-        default: 'aosp-r416183b1'
 
 jobs:
   build:
@@ -32,11 +28,11 @@ jobs:
     steps:
       - name: 📢 Notify START
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          if [ -z "$BOT_TOKEN" ]; then echo "no token"; exit 0; fi
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="🚀 Build Started AOSP - ${{ inputs.KERNEL_BRANCH }} - ${{ inputs.KERNEL_CONFIG }}"
+          if [ -z "$BOT_TOKEN" ]; then echo "BOT_TOKEN kosong"; exit 0; fi
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d parse_mode=HTML -d text="🚀 <b>Build Started</b>%0A🌿 ${{ inputs.KERNEL_BRANCH }}%0A📄 ${{ inputs.KERNEL_CONFIG }}"
 
       - name: Clone Kernel
         run: |
@@ -49,21 +45,15 @@ jobs:
       - name: Setup AOSP Clang
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison zip curl wget cpio python3 perl zstd dwarves gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libelf-dev
-          
-          rm -rf clang
-          echo "Downloading AOSP Clang r416183b1 from Lineage mirror..."
-          # Mirror yang work di Actions
-          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b1.git clang -b lineage-19.1 || \
-          git clone --depth=1 https://gitlab.com/ThankYouMario/proton-clang.git clang || \
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          
+          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison zip curl wget cpio python3 perl zstd dwarves gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          rm -rf clang && mkdir clang
+          curl -L -o clang.tar.gz https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz
+          tar -xzf clang.tar.gz --strip-components=1 -C clang
+          rm clang.tar.gz
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           clang --version
-          ld.lld --version || ld.lld-14 --version
-          ls clang/bin
-          
+
       - name: Setup KSU
         run: |
           cd kernel
@@ -78,7 +68,7 @@ jobs:
           export ARCH=arm64 SUBARCH=arm64
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           OUT=$GITHUB_WORKSPACE/out
-          MAKE_ARGS="-C kernel O=$OUT ARCH=arm64 SUBARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM=1 LLVM_IAS=0 HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon -j$(nproc --all)"
+          MAKE_ARGS="-C kernel O=$OUT ARCH=arm64 SUBARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM=1 LLVM_IAS=0 -j$(nproc --all)"
           KCF="-Wno-error"
           mkdir -p $OUT
           make $MAKE_ARGS KCFLAGS="$KCF" ${{ inputs.KERNEL_CONFIG }}
@@ -91,7 +81,6 @@ jobs:
           if [ "${{ inputs.PATCH_KERNELSU }}" != "none" ]; then $CFG -e CONFIG_KSU; fi
           make $MAKE_ARGS KCFLAGS="$KCF" olddefconfig
           make $MAKE_ARGS KCFLAGS="$KCF" Image.gz-dtb 2>&1 | tee build.log
-          ls -lh $OUT/arch/arm64/boot/
           cp $OUT/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
           ZIPNAME="BTX-AOSP-${{ inputs.KERNEL_BRANCH }}-$(date +%Y%m%d-%H%M)"
@@ -105,22 +94,22 @@ jobs:
           name: ${{ env.ZIPNAME }}
           path: ${{ env.ZIPNAME }}.zip
 
-      - name: 📢 SUCCESS to Telegram
+      - name: 📢 SUCCESS
         if: success()
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
           curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="✅ SUKSES ${{ env.ZIPNAME }}"
           curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@"${{ env.ZIPNAME }}.zip"
 
-      - name: ❌ ERROR to Telegram
+      - name: ❌ ERROR
         if: failure()
         env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
           curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="❌ GAGAL ${{ inputs.KERNEL_BRANCH }}"
-          tail -n 200 build.log > error.txt || true
+          tail -n 300 build.log > error.txt || true
           curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@error.txt
           curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@build.log || true
