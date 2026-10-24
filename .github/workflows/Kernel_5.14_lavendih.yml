@@ -1,26 +1,32 @@
-name: Build BTX Kernel (lavender sdm660)
+name: Build BTX Kernel MANUAL + Telegram Log
 
 on:
   workflow_dispatch:
     inputs:
+      KERNEL_SOURCE:
+        description: 'Source Repo URL'
+        required: true
+        default: 'https://github.com/imarsya991-gif/BTX_Kernel_sdm660'
+      KERNEL_BRANCH:
+        description: 'Branch source'
+        required: true
+        default: 'upstream-302'
       KERNEL_CONFIG:
-        description: 'Base defconfig'
+        description: 'Defconfig file'
         required: true
         default: 'lavender-perf_defconfig'
       EXTRA_CONFIG:
-        description: 'Config fragment spasi (boleh kosong)'
+        description: 'Extra fragment (optional)'
         required: false
         default: ''
       PATCH_KERNELSU:
-        description: 'Varian KernelSU (xxksu / ksu-next / none)'
+        description: 'KSU variant'
         required: true
+        type: choice
+        options: [xxksu, ksu-next, none]
         default: 'xxksu'
-      DROIDSPACES:
-        description: 'Aktifkan Droidspaces (true / false)'
-        required: true
-        default: 'false'
       CLANG_VERSION:
-        description: 'Versi Clang'
+        description: 'Clang version'
         required: true
         default: '17'
 
@@ -28,105 +34,98 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout BTX Kernel (upstream-302)
-        uses: actions/checkout@v4
-        with:
-          ref: upstream-302
-          path: kernel
-          fetch-depth: 1
+      - name: 📢 Notify START to Telegram
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -d parse_mode=HTML \
+          -d text="🚀 <b>Build Started</b>%0A📦 <code>${{ inputs.KERNEL_SOURCE }}</code>%0A🌿 Branch: <code>${{ inputs.KERNEL_BRANCH }}</code>%0A📄 Defconfig: <code>${{ inputs.KERNEL_CONFIG }}</code>%0A🔧 KSU: ${{ inputs.PATCH_KERNELSU }}"
+
+      - name: Clone Kernel Source
+        run: |
+          rm -rf kernel AnyKernel3 out
+          git clone --depth=1 --branch ${{ inputs.KERNEL_BRANCH }} ${{ inputs.KERNEL_SOURCE }}.git kernel || git clone --depth=1 --branch ${{ inputs.KERNEL_BRANCH }} ${{ inputs.KERNEL_SOURCE }} kernel
+          git -C kernel log --oneline -3
+          ls kernel/arch/arm64/configs | grep -E "lavender|sdm660" || true
 
       - name: Clone AnyKernel3
         run: git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-      - name: Setup build env
+      - name: Setup Env + Clang
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev \
-            flex bison zip git curl wget cpio python3 perl zstd dwarves \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-
-      - name: Install Clang
-        run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
+          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison zip curl wget cpio python3 perl zstd dwarves gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
           sudo ./llvm.sh ${{ inputs.CLANG_VERSION }}
           sudo apt-get install -y lld-${{ inputs.CLANG_VERSION }} llvm-${{ inputs.CLANG_VERSION }}
           echo "/usr/lib/llvm-${{ inputs.CLANG_VERSION }}/bin" >> $GITHUB_PATH
 
-      - name: Setup KernelSU
+      - name: Setup KSU
         run: |
           cd kernel
-          if [ -d KernelSU ] || [ -d drivers/kernelsu ]; then
-            echo "KernelSU sudah ada"
-          elif [ "${{ inputs.PATCH_KERNELSU }}" == "xxksu" ]; then
+          if [ "${{ inputs.PATCH_KERNELSU }}" == "xxksu" ]; then
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           elif [ "${{ inputs.PATCH_KERNELSU }}" == "ksu-next" ]; then
             curl -LSs "https://raw.githubusercontent.com/rifs28/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           fi
 
-      - name: Build kernel
+      - name: Build Kernel
         run: |
-          clang --version | head -n1
-          export ARCH=arm64
-          export SUBARCH=arm64
-          OUT="$GITHUB_WORKSPACE/out"
-          KERNEL_CONFIG="${{ inputs.KERNEL_CONFIG }}"
-          CFGDIR="kernel/arch/arm64/configs"
-          KERNEL_NAME="-BTX-v4.4.260"
-
-          if [ ! -f "$CFGDIR/$KERNEL_CONFIG" ]; then
-            echo "Defconfig $KERNEL_CONFIG gak ketemu, list:"
-            ls $CFGDIR | grep lavender; ls $CFGDIR | grep sdm660; ls $CFGDIR/vendor 2>/dev/null | head -n 50
-            exit 1
-          fi
-
+          export ARCH=arm64 SUBARCH=arm64
+          OUT=$GITHUB_WORKSPACE/out
           MAKE_ARGS="-C kernel O=$OUT ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon -j$(nproc --all)"
           KCF="-Wno-error -Wno-unused-but-set-variable -Wno-implicit-function-declaration -Wno-int-conversion -Wno-strict-prototypes -Wno-deprecated-non-prototype"
-
           mkdir -p $OUT
-          make $MAKE_ARGS KCFLAGS="$KCF" $KERNEL_CONFIG
-
-          for frag in ${{ inputs.EXTRA_CONFIG }}; do
-            [ -f "$CFGDIR/$frag" ] && cat "$CFGDIR/$frag" >> $OUT/.config || echo "skip $frag"
-          done
-
+          make $MAKE_ARGS KCFLAGS="$KCF" ${{ inputs.KERNEL_CONFIG }}
           CFG="kernel/scripts/config --file $OUT/.config"
-          $CFG --set-str CONFIG_LOCALVERSION "$KERNEL_NAME"
-          $CFG -d CONFIG_LOCALVERSION_AUTO
-
-          if [ "${{ inputs.PATCH_KERNELSU }}" != "none" ]; then
-            $CFG -e CONFIG_KSU; $CFG -e CONFIG_KSU_TAMPER_SYS_CALL; $CFG -d CONFIG_KSU_VIA_KPROBES
-          fi
-
-          if [ "${{ inputs.DROIDSPACES }}" == "true" ]; then
-            for opt in SYSVIPC POSIX_MQUEUE NAMESPACES UTS_NS IPC_NS USER_NS PID_NS NET_NS CGROUPS OVERLAY_FS VETH BRIDGE; do $CFG -e CONFIG_$opt; done
-          fi
-
+          $CFG --set-str CONFIG_LOCALVERSION "-BTX-${{ inputs.KERNEL_BRANCH }}" || true
+          $CFG -d CONFIG_LOCALVERSION_AUTO || true
+          if [ "${{ inputs.PATCH_KERNELSU }}" != "none" ]; then $CFG -e CONFIG_KSU; fi
           make $MAKE_ARGS KCFLAGS="$KCF" olddefconfig
           make $MAKE_ARGS KCFLAGS="$KCF" Image.gz-dtb 2>&1 | tee build.log
-          test ${PIPESTATUS[0]} -eq 0
-
-          IMG="$OUT/arch/arm64/boot/Image.gz-dtb"
-          ZIPNAME="BTX-lavender-$(date +%Y%m%d-%H%M)"
-          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
-          cp "$IMG" AnyKernel3/
+          cp $OUT/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
-          sed -i 's/^kernel.string=.*/kernel.string=BTX sdm660/' anykernel.sh
-          sed -i 's/^device.name1=.*/device.name1=lavender/' anykernel.sh
-          sed -i 's/^device.name2=.*/device.name2=lavender/' anykernel.sh
-          sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' anykernel.sh
-          sed -i 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0;/' anykernel.sh
+          ZIPNAME="BTX-${{ inputs.KERNEL_BRANCH }}-$(date +%Y%m%d-%H%M)"
+          echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
+          sed -i "s/kernel.string=.*/kernel.string=BTX ${{ inputs.KERNEL_BRANCH }}/" anykernel.sh
+          sed -i "s/device.name1=.*/device.name1=lavender/" anykernel.sh
           zip -r9 "../$ZIPNAME.zip" * -x .git README.md
 
-      - name: Upload Zip
+      - name: Upload Zip Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: BTX-lavender-zip
+          name: kernel-zip-${{ inputs.KERNEL_BRANCH }}
           path: ${{ env.ZIPNAME }}.zip
 
-      - name: Upload log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
+      - name: 📢 Notify SUCCESS + Send Zip to Telegram
+        if: success()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -d text="✅ Build SUKSES - ${{ env.ZIPNAME }}.zip"
+
+          # Kirim zip kalau <50MB limit bot
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument \
+          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -F document=@"${{ env.ZIPNAME }}.zip" \
+          -F caption="✅ ${{ env.ZIPNAME }} - ${{ inputs.KERNEL_CONFIG }}"
+
+      - name: ❌ Notify ERROR + Send Log to Telegram
+        if: failure()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -d text="❌ Build GAGAL Branch ${{ inputs.KERNEL_BRANCH }}"
+
+          tail -n 150 build.log > error.txt || echo "no build.log" > error.txt
+          
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument \
+          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -F document=@error.txt \
+          -F caption="❌ Error tail log"
+
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument \
+          -F chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+          -F document=@build.log \
+          -F caption="Full build.log"
