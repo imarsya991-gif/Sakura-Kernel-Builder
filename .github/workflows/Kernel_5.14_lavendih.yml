@@ -1,4 +1,4 @@
-name: Build BTX Kernel MANUAL + Telegram Log
+name: Build BTX Kernel AOSP Clang + Telegram
 
 on:
   workflow_dispatch:
@@ -15,57 +15,56 @@ on:
         description: 'Defconfig file'
         required: true
         default: 'lavender-perf_defconfig'
-      EXTRA_CONFIG:
-        description: 'Extra fragment (optional)'
-        required: false
-        default: ''
       PATCH_KERNELSU:
         description: 'KSU variant'
         required: true
         type: choice
         options: [xxksu, ksu-next, none]
         default: 'xxksu'
-      CLANG_VERSION:
-        description: 'Clang version (pakai 15 buat 4.4)'
+      CLANG_SOURCE:
+        description: 'AOSP Clang (aosp r416183b1/proton)'
         required: true
-        default: '15'
+        default: 'aosp-r416183b1'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 📢 Notify START to Telegram
+      - name: 📢 Notify START
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          if [ -z "$BOT_TOKEN" ]; then echo "❌ BOT_TOKEN kosong! Set secret dulu"; exit 0; fi
-          if [ -z "$CHAT_ID" ]; then echo "❌ CHAT_ID kosong!"; exit 0; fi
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage \
-          -d chat_id=$CHAT_ID \
-          -d parse_mode=HTML \
-          -d text="🚀 <b>Build Started</b>%0A📦 <code>${{ inputs.KERNEL_SOURCE }}</code>%0A🌿 Branch: <code>${{ inputs.KERNEL_BRANCH }}</code>%0A📄 Defconfig: <code>${{ inputs.KERNEL_CONFIG }}</code>%0A🔧 KSU: ${{ inputs.PATCH_KERNELSU }}%0A🛠 Clang: ${{ inputs.CLANG_VERSION }}"
+          if [ -z "$BOT_TOKEN" ]; then echo "no token"; exit 0; fi
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="🚀 Build Started AOSP - ${{ inputs.KERNEL_BRANCH }} - ${{ inputs.KERNEL_CONFIG }}"
 
-      - name: Clone Kernel Source
+      - name: Clone Kernel
         run: |
-          rm -rf kernel AnyKernel3 out
+          rm -rf kernel AnyKernel3 out clang
           git clone --depth=1 --branch ${{ inputs.KERNEL_BRANCH }} ${{ inputs.KERNEL_SOURCE }}.git kernel || git clone --depth=1 --branch ${{ inputs.KERNEL_BRANCH }} ${{ inputs.KERNEL_SOURCE }} kernel
-          git -C kernel log --oneline -3
-          ls kernel/arch/arm64/configs | grep -E "lavender|sdm660|perf" || ls kernel/arch/arm64/configs | head -20
 
       - name: Clone AnyKernel3
         run: git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
-      - name: Setup Env + Clang
+      - name: Setup AOSP Clang
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison zip curl wget cpio python3 perl zstd dwarves gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-          wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh
-          sudo ./llvm.sh ${{ inputs.CLANG_VERSION }}
-          sudo apt-get install -y lld-${{ inputs.CLANG_VERSION }} llvm-${{ inputs.CLANG_VERSION }}
-          echo "/usr/lib/llvm-${{ inputs.CLANG_VERSION }}/bin" >> $GITHUB_PATH
-          clang --version
-          ld.lld --version
+          sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison zip curl wget cpio python3 perl zstd dwarves gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libelf-dev
+          
+          # AOSP Clang r416183b1 = Android 12L, paling cocok buat 4.4
+          if [ "${{ inputs.CLANG_SOURCE }}" == "aosp-r416183b1" ]; then
+            mkdir clang && cd clang
+            wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/clang-r416183b1/clang-r416183b1.tar.gz -O clang.tar.gz
+            tar -xf clang.tar.gz
+            cd ..
+          else
+            # Proton clang fallback
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          fi
+          
+          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+          $GITHUB_WORKSPACE/clang/bin/clang --version
+          ls $GITHUB_WORKSPACE/clang/bin | grep lld
 
       - name: Setup KSU
         run: |
@@ -79,68 +78,51 @@ jobs:
       - name: Build Kernel
         run: |
           export ARCH=arm64 SUBARCH=arm64
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
           OUT=$GITHUB_WORKSPACE/out
-          # FIX PENTING: LLVM_IAS=0 buat kernel 4.4
-          MAKE_ARGS="-C kernel O=$OUT ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=0 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu- HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon -j$(nproc --all)"
-          KCF="-Wno-error -Wno-unused-but-set-variable -Wno-implicit-function-declaration -Wno-int-conversion -Wno-strict-prototypes -Wno-deprecated-non-prototype -Wno-return-mismatch"
-          
+          MAKE_ARGS="-C kernel O=$OUT ARCH=arm64 SUBARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip LLVM=1 LLVM_IAS=0 HOSTCFLAGS=-fcommon HOSTCXXFLAGS=-fcommon -j$(nproc --all)"
+          KCF="-Wno-error"
           mkdir -p $OUT
           make $MAKE_ARGS KCFLAGS="$KCF" ${{ inputs.KERNEL_CONFIG }}
-
           CFG="kernel/scripts/config --file $OUT/.config"
-          $CFG --set-str CONFIG_LOCALVERSION "-BTX-${{ inputs.KERNEL_BRANCH }}" || true
+          $CFG --set-str CONFIG_LOCALVERSION "-BTX-AOSP-${{ inputs.KERNEL_BRANCH }}" || true
           $CFG -d CONFIG_LOCALVERSION_AUTO || true
           $CFG -d CONFIG_THINLTO || true
           $CFG -d CONFIG_LTO_CLANG || true
           $CFG -d CONFIG_CFI_CLANG || true
-          $CFG -d CONFIG_GCC_PLUGINS || true
           if [ "${{ inputs.PATCH_KERNELSU }}" != "none" ]; then $CFG -e CONFIG_KSU; fi
-          
           make $MAKE_ARGS KCFLAGS="$KCF" olddefconfig
-          
-          echo "=== BUILD START ==="
-          set -o pipefail
           make $MAKE_ARGS KCFLAGS="$KCF" Image.gz-dtb 2>&1 | tee build.log
-          
-          echo "=== ls boot ==="
-          ls -lhR $OUT/arch/arm64/boot || true
-          
-          IMG=$(find $OUT -name "Image.gz-dtb" -o -name "Image.gz" | head -n1)
-          echo "IMG FOUND: $IMG"
-          if [ -z "$IMG" ]; then echo "❌ Image not found"; tail -n 300 build.log; exit 1; fi
-          
-          cp $IMG AnyKernel3/Image.gz-dtb
+          ls -lh $OUT/arch/arm64/boot/
+          cp $OUT/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
-          ZIPNAME="BTX-${{ inputs.KERNEL_BRANCH }}-$(date +%Y%m%d-%H%M)"
+          ZIPNAME="BTX-AOSP-${{ inputs.KERNEL_BRANCH }}-$(date +%Y%m%d-%H%M)"
           echo "ZIPNAME=$ZIPNAME" >> $GITHUB_ENV
-          sed -i "s/kernel.string=.*/kernel.string=BTX ${{ inputs.KERNEL_BRANCH }} by BTX/" anykernel.sh || true
-          sed -i "s/device.name1=.*/device.name1=lavender/" anykernel.sh || true
           zip -r9 "../$ZIPNAME.zip" * -x .git README.md
 
-      - name: Upload Zip Artifact
+      - name: Upload Zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-zip-${{ inputs.KERNEL_BRANCH }}
+          name: ${{ env.ZIPNAME }}
           path: ${{ env.ZIPNAME }}.zip
 
-      - name: 📢 Notify SUCCESS + Send Zip to Telegram
+      - name: 📢 SUCCESS to Telegram
         if: success()
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ZIPNAME: ${{ env.ZIPNAME }}
         run: |
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="✅ Build SUKSES - $ZIPNAME.zip - Branch ${{ inputs.KERNEL_BRANCH }}"
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@"$ZIPNAME.zip" -F caption="✅ $ZIPNAME - ${{ inputs.KERNEL_CONFIG }}"
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="✅ SUKSES ${{ env.ZIPNAME }}"
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@"${{ env.ZIPNAME }}.zip"
 
-      - name: ❌ Notify ERROR + Send Log to Telegram
+      - name: ❌ ERROR to Telegram
         if: failure()
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="❌ Build GAGAL - Branch ${{ inputs.KERNEL_BRANCH }} - ${{ inputs.KERNEL_CONFIG }}"
-          tail -n 200 build.log > error.txt || echo "no log" > error.txt
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@error.txt -F caption="❌ Tail 200 log"
-          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@build.log -F caption="Full build.log" || echo "log too big"
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendMessage -d chat_id=$CHAT_ID -d text="❌ GAGAL ${{ inputs.KERNEL_BRANCH }}"
+          tail -n 200 build.log > error.txt || true
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@error.txt
+          curl -s -X POST https://api.telegram.org/bot$BOT_TOKEN/sendDocument -F chat_id=$CHAT_ID -F document=@build.log || true
