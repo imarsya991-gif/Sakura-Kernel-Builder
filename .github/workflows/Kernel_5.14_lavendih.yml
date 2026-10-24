@@ -51,21 +51,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential bc libncurses5-dev libssl-dev libelf-dev flex bison zip curl wget cpio python3 perl zstd dwarves gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libelf-dev
           
-          # AOSP Clang r416183b1 = Android 12L, paling cocok buat 4.4
-          if [ "${{ inputs.CLANG_SOURCE }}" == "aosp-r416183b1" ]; then
-            mkdir clang && cd clang
-            wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/clang-r416183b1/clang-r416183b1.tar.gz -O clang.tar.gz
-            tar -xf clang.tar.gz
-            cd ..
-          else
-            # Proton clang fallback
-            git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          fi
+          rm -rf clang
+          echo "Downloading AOSP Clang r416183b1 from Lineage mirror..."
+          # Mirror yang work di Actions
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b1.git clang -b lineage-19.1 || \
+          git clone --depth=1 https://gitlab.com/ThankYouMario/proton-clang.git clang || \
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           
           echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
-          $GITHUB_WORKSPACE/clang/bin/clang --version
-          ls $GITHUB_WORKSPACE/clang/bin | grep lld
-
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          clang --version
+          ld.lld --version || ld.lld-14 --version
+          ls clang/bin
+          
       - name: Setup KSU
         run: |
           cd kernel
